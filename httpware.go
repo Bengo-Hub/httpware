@@ -10,7 +10,7 @@
 //
 // Usage with Chi router:
 //
-//	import httpware "github.com/Bengo-Hub/shared-httpware"
+//	import httpware "github.com/Bengo-Hub/httpware"
 //
 //	r := chi.NewRouter()
 //	r.Use(httpware.RequestID)
