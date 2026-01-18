@@ -1,4 +1,4 @@
-module github.com/Bengo-Hub/shared-httpware
+module github.com/Bengo-Hub/httpware
 
 go 1.24.0
 
