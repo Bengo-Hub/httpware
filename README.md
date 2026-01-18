@@ -1,6 +1,6 @@
 # Shared HTTP Middleware (httpware)
 
-**Repository:** `github.com/Bengo-Hub/shared-httpware`
+**Repository:** `github.com/Bengo-Hub/httpware`
 
 Standardized HTTP middleware for BengoBox microservices, eliminating code duplication across services.
 
@@ -15,7 +15,7 @@ Standardized HTTP middleware for BengoBox microservices, eliminating code duplic
 ## Installation
 
 ```bash
-go get github.com/Bengo-Hub/shared-httpware@v0.1.0
+go get github.com/Bengo-Hub/httpware@v0.1.0
 ```
 
 ## Usage
@@ -25,7 +25,7 @@ go get github.com/Bengo-Hub/shared-httpware@v0.1.0
 ```go
 import (
     "github.com/go-chi/chi/v5"
-    httpware "github.com/Bengo-Hub/shared-httpware"
+    httpware "github.com/Bengo-Hub/httpware"
     "go.uber.org/zap"
 )
 
@@ -50,7 +50,7 @@ func main() {
 ```go
 import (
     "net/http"
-    httpware "github.com/Bengo-Hub/shared-httpware"
+    httpware "github.com/Bengo-Hub/httpware"
     "go.uber.org/zap"
 )
 
@@ -149,7 +149,7 @@ Replace local middleware imports:
 import "your-service/internal/shared/middleware"
 
 // After
-import httpware "github.com/Bengo-Hub/shared-httpware"
+import httpware "github.com/Bengo-Hub/httpware"
 ```
 
 Update usage:
