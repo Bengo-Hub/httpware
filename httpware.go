@@ -37,14 +37,17 @@ const (
 	RequestIDKey contextKey = "request_id"
 	// TenantIDKey is the context key for tenant ID.
 	TenantIDKey contextKey = "tenant_id"
+	// TenantSlugKey is the context key for tenant slug.
+	TenantSlugKey contextKey = "tenant_slug"
 	// UserIDKey is the context key for user ID.
 	UserIDKey contextKey = "user_id"
 )
 
 // Header names for request/response.
 const (
-	HeaderRequestID = "X-Request-ID"
-	HeaderTenantID  = "X-Tenant-ID"
+	HeaderRequestID  = "X-Request-ID"
+	HeaderTenantID   = "X-Tenant-ID"
+	HeaderTenantSlug = "X-Tenant-Slug"
 )
 
 // RequestID middleware extracts request ID from X-Request-ID header or generates a new one.
@@ -74,6 +77,98 @@ func Tenant(next http.Handler) http.Handler {
 	})
 }
 
+// TenantConfig configures the TenantV2 middleware.
+// Uses interface callbacks to avoid hard-coupling to auth-client or chi.
+type TenantConfig struct {
+	// ClaimsExtractor extracts tenant_id and tenant_slug from JWT claims in context.
+	// Returns empty strings if claims are not available. May be nil.
+	ClaimsExtractor func(ctx context.Context) (tenantID, tenantSlug string, ok bool)
+
+	// URLParamFunc extracts a named URL path parameter from the request.
+	// Typically wired to chi.URLParam. May be nil.
+	URLParamFunc func(r *http.Request, key string) string
+
+	// URLParamName is the name of the URL path parameter for tenant (default: "tenant").
+	URLParamName string
+
+	// Required causes the middleware to return 400 if no tenant ID is resolved.
+	Required bool
+}
+
+// TenantV2 middleware resolves tenant ID and slug via chained extraction:
+//  1. JWT claims (via ClaimsExtractor callback)
+//  2. HTTP headers (X-Tenant-ID, X-Tenant-Slug)
+//  3. URL path parameter (via URLParamFunc callback)
+//
+// Each source can fill in missing values without overriding already-resolved ones.
+// The resolved values are stored in context via TenantIDKey and TenantSlugKey.
+func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
+	if cfg.URLParamName == "" {
+		cfg.URLParamName = "tenant"
+	}
+
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var tenantID, tenantSlug string
+
+			// 1. JWT claims (highest priority)
+			if cfg.ClaimsExtractor != nil {
+				if claimTID, claimSlug, ok := cfg.ClaimsExtractor(r.Context()); ok {
+					tenantID = claimTID
+					tenantSlug = claimSlug
+				}
+			}
+
+			// 2. HTTP headers (fill gaps)
+			if tenantID == "" {
+				if hdr := r.Header.Get(HeaderTenantID); hdr != "" {
+					tenantID = hdr
+				}
+			}
+			if tenantSlug == "" {
+				if hdr := r.Header.Get(HeaderTenantSlug); hdr != "" {
+					tenantSlug = hdr
+				}
+			}
+
+			// 3. URL path parameter (fill gaps — could be UUID or slug)
+			if cfg.URLParamFunc != nil {
+				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" {
+					// Determine if param is a UUID or a slug
+					if _, err := uuid.Parse(param); err == nil {
+						// It's a UUID → use as tenant ID
+						if tenantID == "" {
+							tenantID = param
+						}
+					} else {
+						// It's a slug → use as tenant slug
+						if tenantSlug == "" {
+							tenantSlug = param
+						}
+					}
+				}
+			}
+
+			// Enforce required tenant
+			if cfg.Required && tenantID == "" && tenantSlug == "" {
+				http.Error(w, `{"error":"tenant context required"}`, http.StatusBadRequest)
+				return
+			}
+
+			// Store in context
+			ctx := r.Context()
+			if tenantID != "" {
+				ctx = context.WithValue(ctx, TenantIDKey, tenantID)
+			}
+			if tenantSlug != "" {
+				ctx = context.WithValue(ctx, TenantSlugKey, tenantSlug)
+			}
+
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
 // Logging middleware logs HTTP requests with structured fields.
 // Logs include: method, path, status code, duration, and request ID.
 func Logging(log *zap.Logger) func(http.Handler) http.Handler {
@@ -94,6 +189,9 @@ func Logging(log *zap.Logger) func(http.Handler) http.Handler {
 
 			if tenantID := GetTenantID(r.Context()); tenantID != "" {
 				fields = append(fields, zap.String("tenant_id", tenantID))
+			}
+			if tenantSlug := GetTenantSlug(r.Context()); tenantSlug != "" {
+				fields = append(fields, zap.String("tenant_slug", tenantSlug))
 			}
 
 			log.Info("http request", fields...)
@@ -137,7 +235,7 @@ func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug"},
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}
@@ -197,6 +295,14 @@ func GetTenantID(ctx context.Context) string {
 	return ""
 }
 
+// GetTenantSlug returns the tenant slug from context, or empty string if not found.
+func GetTenantSlug(ctx context.Context) string {
+	if slug, ok := ctx.Value(TenantSlugKey).(string); ok {
+		return slug
+	}
+	return ""
+}
+
 // GetUserID returns the user ID from context, or empty string if not found.
 func GetUserID(ctx context.Context) string {
 	if id, ok := ctx.Value(UserIDKey).(string); ok {
@@ -213,6 +319,11 @@ func WithRequestID(ctx context.Context, requestID string) context.Context {
 // WithTenantID adds a tenant ID to the context.
 func WithTenantID(ctx context.Context, tenantID string) context.Context {
 	return context.WithValue(ctx, TenantIDKey, tenantID)
+}
+
+// WithTenantSlug adds a tenant slug to the context.
+func WithTenantSlug(ctx context.Context, slug string) context.Context {
+	return context.WithValue(ctx, TenantSlugKey, slug)
 }
 
 // WithUserID adds a user ID to the context.
