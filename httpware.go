@@ -41,6 +41,8 @@ const (
 	TenantSlugKey contextKey = "tenant_slug"
 	// UserIDKey is the context key for user ID.
 	UserIDKey contextKey = "user_id"
+	// IsPlatformOwnerKey is the context key for platform owner flag.
+	IsPlatformOwnerKey contextKey = "is_platform_owner"
 )
 
 // Header names for request/response.
@@ -80,9 +82,9 @@ func Tenant(next http.Handler) http.Handler {
 // TenantConfig configures the TenantV2 middleware.
 // Uses interface callbacks to avoid hard-coupling to auth-client or chi.
 type TenantConfig struct {
-	// ClaimsExtractor extracts tenant_id and tenant_slug from JWT claims in context.
-	// Returns empty strings if claims are not available. May be nil.
-	ClaimsExtractor func(ctx context.Context) (tenantID, tenantSlug string, ok bool)
+	// ClaimsExtractor extracts tenant_id, tenant_slug and is_platform_owner from JWT claims in context.
+	// Returns empty strings and false if claims are not available. May be nil.
+	ClaimsExtractor func(ctx context.Context) (tenantID, tenantSlug string, isPlatformOwner bool, ok bool)
 
 	// URLParamFunc extracts a named URL path parameter from the request.
 	// Typically wired to chi.URLParam. May be nil.
@@ -110,12 +112,14 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var tenantID, tenantSlug string
+			var isPlatformOwner bool
 
 			// 1. JWT claims (highest priority)
 			if cfg.ClaimsExtractor != nil {
-				if claimTID, claimSlug, ok := cfg.ClaimsExtractor(r.Context()); ok {
+				if claimTID, claimSlug, claimIsPO, ok := cfg.ClaimsExtractor(r.Context()); ok {
 					tenantID = claimTID
 					tenantSlug = claimSlug
+					isPlatformOwner = claimIsPO
 				}
 			}
 
@@ -162,6 +166,9 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			}
 			if tenantSlug != "" {
 				ctx = context.WithValue(ctx, TenantSlugKey, tenantSlug)
+			}
+			if isPlatformOwner {
+				ctx = context.WithValue(ctx, IsPlatformOwnerKey, true)
 			}
 
 			next.ServeHTTP(w, r.WithContext(ctx))
@@ -230,10 +237,11 @@ type CORSConfig struct {
 	MaxAge           int // in seconds
 }
 
-// DefaultCORSConfig returns a permissive CORS configuration for development.
+// DefaultCORSConfig returns a secure CORS configuration with explicit origins.
+// In production, override AllowedOrigins via environment configuration.
 func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   []string{"https://accounts.codevertexitsolutions.com", "https://ordersapp.codevertexitsolutions.com", "https://pos.codevertexitsolutions.com"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug"},
 		AllowCredentials: true,
@@ -301,6 +309,14 @@ func GetTenantSlug(ctx context.Context) string {
 		return slug
 	}
 	return ""
+}
+
+// IsPlatformOwner returns true if the user is a platform owner.
+func IsPlatformOwner(ctx context.Context) bool {
+	if isPO, ok := ctx.Value(IsPlatformOwnerKey).(bool); ok {
+		return isPO
+	}
+	return false
 }
 
 // GetUserID returns the user ID from context, or empty string if not found.
