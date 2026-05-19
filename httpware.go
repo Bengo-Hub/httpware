@@ -43,6 +43,8 @@ const (
 	UserIDKey contextKey = "user_id"
 	// IsPlatformOwnerKey is the context key for platform owner flag.
 	IsPlatformOwnerKey contextKey = "is_platform_owner"
+	// OutletIDKey is the context key for the resolved outlet ID.
+	OutletIDKey contextKey = "outlet_id"
 )
 
 // Header names for request/response.
@@ -50,6 +52,9 @@ const (
 	HeaderRequestID  = "X-Request-ID"
 	HeaderTenantID   = "X-Tenant-ID"
 	HeaderTenantSlug = "X-Tenant-Slug"
+	// HeaderOutletID is sent by frontends to override the active outlet/branch.
+	// Tenant admins and platform owners use this to drill into a specific outlet.
+	HeaderOutletID = "X-Outlet-ID"
 )
 
 // RequestID middleware extracts request ID from X-Request-ID header or generates a new one.
@@ -200,6 +205,9 @@ func Logging(log *zap.Logger) func(http.Handler) http.Handler {
 			if tenantSlug := GetTenantSlug(r.Context()); tenantSlug != "" {
 				fields = append(fields, zap.String("tenant_slug", tenantSlug))
 			}
+			if outletID := GetOutletID(r.Context()); outletID != "" {
+				fields = append(fields, zap.String("outlet_id", outletID))
+			}
 
 			log.Info("http request", fields...)
 		})
@@ -243,7 +251,7 @@ func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
 		AllowedOrigins:   []string{"https://accounts.codevertexitsolutions.com", "https://ordersapp.codevertexitsolutions.com", "https://pos.codevertexitsolutions.com"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug"},
+		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug", "X-Outlet-ID"},
 		AllowCredentials: true,
 		MaxAge:           86400,
 	}
@@ -345,6 +353,26 @@ func WithTenantSlug(ctx context.Context, slug string) context.Context {
 // WithUserID adds a user ID to the context.
 func WithUserID(ctx context.Context, userID string) context.Context {
 	return context.WithValue(ctx, UserIDKey, userID)
+}
+
+// GetOutletID returns the outlet ID from context, or empty string if not set.
+func GetOutletID(ctx context.Context) string {
+	if id, ok := ctx.Value(OutletIDKey).(string); ok {
+		return id
+	}
+	return ""
+}
+
+// WithOutletID stores an outlet ID in the context.
+func WithOutletID(ctx context.Context, outletID string) context.Context {
+	return context.WithValue(ctx, OutletIDKey, outletID)
+}
+
+// OutletHeader extracts the X-Outlet-ID header value from the request, or returns empty string.
+// Services that need full outlet resolution (DB lookup, HQ bypass) should use their own
+// outlet context middleware. This helper is for lightweight header-only extraction.
+func OutletHeader(r *http.Request) string {
+	return r.Header.Get(HeaderOutletID)
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code.
