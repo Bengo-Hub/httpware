@@ -141,18 +141,23 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			}
 
 			// 3. URL path parameter (fill gaps — could be UUID or slug)
+			// For platform owners, URL param always wins over claims so they can scope
+			// requests to any tenant (e.g. GET /v1/urban-loft/inventory/... as superuser).
 			if cfg.URLParamFunc != nil {
 				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" {
 					// Determine if param is a UUID or a slug
 					if _, err := uuid.Parse(param); err == nil {
-						// It's a UUID → use as tenant ID
-						if tenantID == "" {
+						// It's a UUID → use as tenant ID (override for platform owners)
+						if tenantID == "" || isPlatformOwner {
 							tenantID = param
 						}
 					} else {
-						// It's a slug → use as tenant slug
-						if tenantSlug == "" {
+						// It's a slug → use as tenant slug (override for platform owners)
+						if tenantSlug == "" || isPlatformOwner {
 							tenantSlug = param
+							if isPlatformOwner {
+								tenantID = "" // reset ID so syncer re-resolves from slug
+							}
 						}
 					}
 				}
