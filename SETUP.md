@@ -7,14 +7,14 @@ When developing locally, use Go workspaces to avoid version conflicts.
 ### 1. Clone Repositories
 
 ```bash
-cd BengoBox/
+cd Codevertex/
 git clone git@github.com:Bengo-Hub/shared-httpware.git shared/httpware
 ```
 
 ### 2. Initialize Go Workspace
 
 ```bash
-cd BengoBox/
+cd Codevertex/
 go work init \
   ./inventory-service/inventory-api \
   ./pos-service/pos-api \

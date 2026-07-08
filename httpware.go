@@ -1,4 +1,4 @@
-// Package httpware provides standardized HTTP middleware for BengoBox microservices.
+// Package httpware provides standardized HTTP middleware for Codevertex microservices.
 //
 // This package eliminates code duplication by providing common middleware functions
 // that were previously duplicated across all services:

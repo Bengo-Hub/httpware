@@ -2,7 +2,7 @@
 
 **Repository:** `github.com/Bengo-Hub/httpware`
 
-Standardized HTTP middleware for BengoBox microservices, eliminating code duplication across services.
+Standardized HTTP middleware for Codevertex microservices, eliminating code duplication across services.
 
 ## Features
 
