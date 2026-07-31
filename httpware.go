@@ -254,7 +254,7 @@ type CORSConfig struct {
 // In production, override AllowedOrigins via environment configuration.
 func DefaultCORSConfig() CORSConfig {
 	return CORSConfig{
-		AllowedOrigins:   []string{"https://accounts.codevertexitsolutions.com", "https://ordersapp.codevertexitsolutions.com", "https://pos.codevertexitsolutions.com"},
+		AllowedOrigins:   []string{"https://accounts.codevertexafrica.com", "https://ordering.codevertexafrica.com", "https://pos.codevertexafrica.com"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug", "X-Outlet-ID"},
 		AllowCredentials: true,
