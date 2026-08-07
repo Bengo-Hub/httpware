@@ -20,7 +20,10 @@
 package httpware
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"runtime/debug"
 	"time"
@@ -381,6 +384,13 @@ func OutletHeader(r *http.Request) string {
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code.
+//
+// Embedding http.ResponseWriter as an INTERFACE field only promotes the three methods
+// declared on that interface (Header/Write/WriteHeader) — Go does not promote any other
+// interface the concrete value underneath happens to implement. Every caller that wraps a
+// request in Logging therefore silently lost http.Hijacker (WebSocket upgrades) and
+// http.Flusher (SSE streaming) capability, regardless of what the real underlying writer
+// supported. Hijack/Unwrap/Flush below close that gap by delegating explicitly.
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
@@ -389,6 +399,32 @@ type responseWriter struct {
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Hijack implements http.Hijacker by delegating to the wrapped writer. Required by
+// WebSocket libraries (nhooyr.io/websocket, gorilla/websocket) that hijack the raw
+// connection directly via a `w.(http.Hijacker)` type assertion.
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hj, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("httpware: underlying %T does not implement http.Hijacker", rw.ResponseWriter)
+	}
+	return hj.Hijack()
+}
+
+// Unwrap exposes the wrapped writer for Go's http.ResponseController (Go 1.20+), the
+// std-library-idiomatic alternative to a raw type assertion for Hijack/Flush/deadlines.
+func (rw *responseWriter) Unwrap() http.ResponseWriter {
+	return rw.ResponseWriter
+}
+
+// Flush implements http.Flusher by delegating to the wrapped writer. Required for SSE
+// (Server-Sent Events) streaming, which must flush after every event to reach the client
+// immediately instead of sitting in a buffer — the same promotion gap as Hijack above.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // joinStrings joins strings with a separator.
