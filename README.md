@@ -109,6 +109,32 @@ r.Use(httpware.CORS(httpware.CORSConfig{
 }))
 ```
 
+### StaticMedia (v0.6.0)
+
+Serves `/media/*` uploads so they cache close to the user (browser, service worker, Cloudflare):
+
+```go
+r.Handle("/media/*", http.StripPrefix("/media", httpware.StaticMedia(mediaRoot, httpware.MediaOptions{})))
+```
+
+- Fingerprinted names (UUID or long hex hash, e.g. `{uuid}_{unix}.png`) get
+  `Cache-Control: public, max-age=31536000, immutable`; other names get 1 day plus
+  `stale-while-revalidate=604800`. Strong ETag, so revalidation is a 304.
+- No directory listings, no dotfiles, no path escape (404).
+- `Access-Control-Allow-Origin: *` and `Cross-Origin-Resource-Policy: cross-origin` so service
+  workers on the UI origins can store the images; `nosniff`; a sandbox CSP for SVG/HTML/XML.
+
+Upload handlers must keep writing new, unique file names on every upload (never overwrite a
+file in place), otherwise an immutable URL would serve stale bytes for a year.
+
+### Streaming helpers (v0.6.0)
+
+- `BypassForStreaming(mw)`: skip a middleware for WebSocket and SSE requests. Wrap chi's
+  `Compress` and `Timeout` with it (both break long-lived connections). Replaces the per-service
+  `bypassForWebsocket` copies.
+- `StreamHeaders(w)`: SSE headers including `X-Accel-Buffering: no` (nginx buffers otherwise).
+- `ExtendWriteDeadline(w)`: lift the server `WriteTimeout` for one streaming response.
+
 ## Middleware Details
 
 ### RequestID
