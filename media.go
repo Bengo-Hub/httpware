@@ -16,6 +16,10 @@ type MediaOptions struct {
 	// browsers, service workers and Cloudflare may keep it for a year without revalidating.
 	// Defaults to IsFingerprinted.
 	Immutable func(name string) bool
+	// Private reports paths that hold personal or sensitive files (e.g. KYC documents). They
+	// get Cache-Control: private, no-store and no cross-origin read header, so no shared cache
+	// (Cloudflare, proxies) or service worker keeps a copy. Defaults to none.
+	Private func(name string) bool
 	// MaxAge (seconds) for names that are not immutable. Default 86400 (1 day), with a 7 day
 	// stale-while-revalidate window so a cached image shows instantly while it refreshes.
 	MaxAge int
@@ -84,14 +88,21 @@ func StaticMedia(root string, opts MediaOptions) http.Handler {
 		}
 
 		h := w.Header()
-		if opts.Immutable(clean) {
+		private := opts.Private != nil && opts.Private(clean)
+		if private {
+			h.Set("Cache-Control", "private, no-store")
+		} else if opts.Immutable(clean) {
 			h.Set("Cache-Control", "public, max-age=31536000, immutable")
 		} else {
 			h.Set("Cache-Control", "public, max-age="+strconv.Itoa(opts.MaxAge)+", stale-while-revalidate=604800")
 		}
 		h.Set("ETag", `"`+strconv.FormatInt(info.Size(), 36)+"-"+strconv.FormatInt(info.ModTime().UnixNano(), 36)+`"`)
-		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Cross-Origin-Resource-Policy", "cross-origin")
+		if !private {
+			h.Set("Access-Control-Allow-Origin", "*")
+			h.Set("Cross-Origin-Resource-Policy", "cross-origin")
+		} else {
+			h.Set("Cross-Origin-Resource-Policy", "same-site")
+		}
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Add("Vary", "Accept-Encoding")
 		switch strings.ToLower(filepath.Ext(clean)) {

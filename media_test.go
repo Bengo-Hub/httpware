@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -75,5 +76,18 @@ func TestBypassForStreaming(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
 	if rec.Code != 599 {
 		t.Fatal("normal request must go through the middleware")
+	}
+}
+
+func TestStaticMediaPrivate(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, "uploads", "kyc"), 0o755)
+	name := "3f0e7a2c-1111-4c3a-9a55-2f6d7c1b0e01_1720000000.jpg"
+	_ = os.WriteFile(filepath.Join(root, "uploads", "kyc", name), []byte("x"), 0o644)
+	h := StaticMedia(root, MediaOptions{Private: func(p string) bool { return strings.HasPrefix(p, "/uploads/kyc/") }})
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/uploads/kyc/"+name, nil))
+	if rec.Header().Get("Cache-Control") != "private, no-store" || rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("private file got %q acao=%q", rec.Header().Get("Cache-Control"), rec.Header().Get("Access-Control-Allow-Origin"))
 	}
 }
