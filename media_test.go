@@ -3,10 +3,12 @@ package httpware
 import (
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestStaticMedia(t *testing.T) {
@@ -89,5 +91,36 @@ func TestStaticMediaPrivate(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/uploads/kyc/"+name, nil))
 	if rec.Header().Get("Cache-Control") != "private, no-store" || rec.Header().Get("Access-Control-Allow-Origin") != "" {
 		t.Fatalf("private file got %q acao=%q", rec.Header().Get("Cache-Control"), rec.Header().Get("Access-Control-Allow-Origin"))
+	}
+}
+
+func TestStaticMediaSignedPrivate(t *testing.T) {
+	root := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(root, "uploads", "patients"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "uploads", "patients", "p.jpg"), []byte("x"), 0o644)
+	signer := NewMediaSigner("secret", time.Hour)
+	h := http.StripPrefix("/media", StaticMedia(root, MediaOptions{Private: func(string) bool { return true }, Signer: signer}))
+	get := func(u string) int {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, u, nil))
+		return rec.Code
+	}
+	if code := get("/media/uploads/patients/p.jpg"); code != http.StatusNotFound {
+		t.Fatalf("unsigned private file must 404, got %d", code)
+	}
+	signed := signer.Sign("https://api.example.com/media/uploads/patients/p.jpg")
+	u, _ := url.Parse(signed)
+	if code := get(u.RequestURI()); code != http.StatusOK {
+		t.Fatalf("signed URL must be served, got %d (%s)", code, signed)
+	}
+	if code := get(strings.Replace(u.RequestURI(), "p.jpg", "q.jpg", 1)); code != http.StatusNotFound {
+		t.Fatal("a signature must not work for another file")
+	}
+	if StripMediaSignature(signed) != "https://api.example.com/media/uploads/patients/p.jpg" {
+		t.Fatalf("strip: %s", StripMediaSignature(signed))
+	}
+	stale := url.Values{"exp": {"1"}, "sig": {u.Query().Get("sig")}}
+	if signer.Verify("/uploads/patients/p.jpg", stale) {
+		t.Fatal("an expired signature must be refused")
 	}
 }

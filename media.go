@@ -20,6 +20,9 @@ type MediaOptions struct {
 	// get Cache-Control: private, no-store and no cross-origin read header, so no shared cache
 	// (Cloudflare, proxies) or service worker keeps a copy. Defaults to none.
 	Private func(name string) bool
+	// Signer, when set, makes Private files require a valid signed URL (MediaSigner.Sign);
+	// unsigned or expired requests get 404, as if the file did not exist.
+	Signer *MediaSigner
 	// MaxAge (seconds) for names that are not immutable. Default 86400 (1 day), with a 7 day
 	// stale-while-revalidate window so a cached image shows instantly while it refreshes.
 	MaxAge int
@@ -89,6 +92,10 @@ func StaticMedia(root string, opts MediaOptions) http.Handler {
 
 		h := w.Header()
 		private := opts.Private != nil && opts.Private(clean)
+		if private && opts.Signer != nil && !opts.Signer.Verify(clean, r.URL.Query()) {
+			http.NotFound(w, r)
+			return
+		}
 		if private {
 			h.Set("Cache-Control", "private, no-store")
 		} else if opts.Immutable(clean) {
