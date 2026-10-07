@@ -135,6 +135,25 @@ file in place), otherwise an immutable URL would serve stale bytes for a year.
 - `StreamHeaders(w)`: SSE headers including `X-Accel-Buffering: no` (nginx buffers otherwise).
 - `ExtendWriteDeadline(w)`: lift the server `WriteTimeout` for one streaming response.
 
+### Contact details: `pii` and `contact` (v0.7.0)
+
+Two small packages so every service treats phone numbers and email addresses the same way.
+
+`github.com/Bengo-Hub/httpware/contact`
+- `NormalizePhone(raw, region)`: E.164 (`"0712 345 678"` to `"+254712345678"`); region defaults to
+  `KE`; numbers that are not valid for their country are rejected. `ValidPhone` wraps it.
+- `SubscriberDigits(phone)`: last nine digits, the platform's dedup key for one number.
+- `NormalizeEmail(raw)` / `ValidEmailSyntax(raw)`: one lowercased, well formed address with a
+  dotted domain. No DNS lookup; senders that need MX checks do them themselves.
+
+`github.com/Bengo-Hub/httpware/pii`
+- `MaskEmail`, `MaskPhone`, `MaskString`, `Mask` (picks the right one) for logs and list views.
+- `HashAddress(address)`: SHA-256 of the normalised address, used as a lookup key (suppression
+  lists, retention) so the address itself need not be stored.
+- zap fields `pii.Email`, `pii.Phone`, `pii.Address` log the masked form.
+
+Only services that import `contact` pull in `nyaruka/phonenumbers`.
+
 ## Middleware Details
 
 ### RequestID
