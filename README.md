@@ -140,8 +140,10 @@ file in place), otherwise an immutable URL would serve stale bytes for a year.
 Two small packages so every service treats phone numbers and email addresses the same way.
 
 `github.com/Bengo-Hub/httpware/contact`
-- `NormalizePhone(raw, region)`: E.164 (`"0712 345 678"` to `"+254712345678"`); region defaults to
-  `KE`; numbers that are not valid for their country are rejected. `ValidPhone` wraps it.
+- `NormalizePhone(raw, region)`: E.164 for any country. A number with its country code
+  (`+44 7911 123456`, `+256 772 123456`) is checked against that country's rules; `region` (ISO
+  code, default `KE`) only decides how a local form such as `0712 345 678` is read, so pass the
+  tenant's or contact's country when known. Invalid numbers are rejected. `ValidPhone` wraps it.
 - `SubscriberDigits(phone)`: last nine digits, the platform's dedup key for one number.
 - `NormalizeEmail(raw)` / `ValidEmailSyntax(raw)`: one lowercased, well formed address with a
   dotted domain. No DNS lookup; senders that need MX checks do them themselves.

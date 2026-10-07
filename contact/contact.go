@@ -19,9 +19,12 @@ var ErrInvalidPhone = errors.New("invalid phone number")
 // ErrInvalidEmail is returned when a value is not a single, well formed email address.
 var ErrInvalidEmail = errors.New("invalid email address")
 
-// NormalizePhone parses raw in the given region (DefaultRegion when empty) and returns it in E.164.
-// It accepts local forms ("0712345678"), international forms ("+254712345678", "254712345678")
-// and common separators. Numbers that parse but are not valid for their region are rejected.
+// NormalizePhone returns raw in E.164. Any country is accepted: a number written with its country
+// code ("+44 7911 123456", "+1 415 555 2671", "254712345678") is checked against that country's
+// own numbering rules. region (an ISO code such as "KE", "UG", "GB"; DefaultRegion when empty)
+// only decides how a local form without a country code ("0712345678") is read, so callers should
+// pass the tenant's or contact's country when they know it. Numbers that are not valid for their
+// country are rejected.
 func NormalizePhone(raw, region string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
