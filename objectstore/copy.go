@@ -88,6 +88,33 @@ func (s *Store) CopyLegacyTree(ctx context.Context, root string) (CopyResult, er
 	return res, err
 }
 
+// RunLegacyCopy is the body of a service's one-time copy command (cmd/copy-media): it copies
+// MEDIA_ROOT to object storage with the shared configuration and prints a summary. Run it inside
+// the service's pod, where the media volume and the object-storage Secret are mounted. It returns
+// an error when any file failed, so the run can be repeated until it is clean.
+func RunLegacyCopy(ctx context.Context, service string, opts ...Option) error {
+	cfg := FromEnv()
+	if cfg.LocalRoot == "" {
+		return fmt.Errorf("objectstore: MEDIA_ROOT is not set, nothing to copy")
+	}
+	st, err := New(service, cfg, opts...)
+	if err != nil {
+		return err
+	}
+	res, err := st.CopyLegacyTree(ctx, cfg.LocalRoot)
+	fmt.Printf("%s: copied %d, already there %d, failed %d\n", service, res.Copied, res.Skipped, res.Failed)
+	for _, e := range res.Errors {
+		fmt.Println("  " + e)
+	}
+	if err != nil {
+		return err
+	}
+	if res.Failed > 0 {
+		return fmt.Errorf("objectstore: %d files failed, run again", res.Failed)
+	}
+	return nil
+}
+
 func (r *CopyResult) fail(path string, err error) {
 	r.Failed++
 	if len(r.Errors) < 20 {

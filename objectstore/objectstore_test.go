@@ -221,6 +221,28 @@ func TestNormalizeAndLegacyBaseURL(t *testing.T) {
 	}
 }
 
+func TestRunLegacyCopy(t *testing.T) {
+	f, srv := newFakeS3(t)
+	root := t.TempDir()
+	_ = os.WriteFile(filepath.Join(root, "a.png"), []byte("a"), 0o644)
+	t.Setenv("OBJECT_STORAGE_ENDPOINT", srv.URL)
+	t.Setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "AK")
+	t.Setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "SK")
+	t.Setenv("OBJECT_STORAGE_PUBLIC_BUCKET", "pub")
+	t.Setenv("OBJECT_STORAGE_PRIVATE_BUCKET", "priv")
+	t.Setenv("MEDIA_ROOT", root)
+	if err := RunLegacyCopy(context.Background(), "inventory"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.objects["pub/inventory/legacy/public/a.png"]; !ok {
+		t.Fatal("not copied")
+	}
+	t.Setenv("MEDIA_ROOT", "")
+	if err := RunLegacyCopy(context.Background(), "inventory"); err == nil {
+		t.Error("no media root must be an error")
+	}
+}
+
 func TestCheck(t *testing.T) {
 	_, srv := newFakeS3(t)
 	ok, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "AK", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
