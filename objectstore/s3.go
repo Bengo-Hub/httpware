@@ -116,6 +116,30 @@ func (c *s3Client) get(ctx context.Context, bucket, key string) ([]byte, string,
 	return data, resp.Header.Get("Content-Type"), nil
 }
 
+// open starts a streaming GET; the caller closes the body. size is -1 when unknown.
+func (c *s3Client) open(ctx context.Context, bucket, key string) (io.ReadCloser, int64, string, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, bucket, key, nil, nil)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	c.sign(req, nil)
+	// No client timeout here: a large file may take longer than the request timeout to stream;
+	// the caller's context bounds it.
+	resp, err := (&http.Client{Transport: c.http.Transport}).Do(req)
+	if err != nil {
+		return nil, 0, "", fmt.Errorf("objectstore get %s: %w", key, err)
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		drain(resp)
+		return nil, 0, "", ErrNotFound
+	}
+	if resp.StatusCode >= 300 {
+		defer drain(resp)
+		return nil, 0, "", fmt.Errorf("objectstore get %s: %s", key, statusDetail(resp))
+	}
+	return resp.Body, resp.ContentLength, resp.Header.Get("Content-Type"), nil
+}
+
 func (c *s3Client) exists(ctx context.Context, bucket, key string) (bool, error) {
 	req, err := c.newRequest(ctx, http.MethodHead, bucket, key, nil, nil)
 	if err != nil {

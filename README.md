@@ -201,6 +201,8 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 - `Owned(ref)`: true only for this service's own keys. Check it before deleting a record's file;
   old volume files and external URLs may be shared and are left alone.
 - `Check(ctx)` is a readiness probe: both buckets reachable with the credentials.
+- `Open(ctx, ref)` (v0.12.0) streams a stored file (reader, size, content type) without holding it
+  in memory; use it to serve large private files (e-books, documents) through the API.
 - Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files
   in local mode, and old `/media/<rel>` paths not yet relinked; private ones, named by
   `WithLegacyPrivate`, only with a link signed by `WithLocalSigner`). With object storage a public

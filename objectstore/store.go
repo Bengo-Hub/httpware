@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -217,6 +218,33 @@ func (s *Store) Get(ctx context.Context, ref string) ([]byte, string, error) {
 		return nil, "", ErrNotFound
 	}
 	return b, "", err
+}
+
+// Open streams a stored file without holding it in memory (large documents, e-books). The caller
+// closes the reader. size is -1 when unknown; local files report no content type.
+func (s *Store) Open(ctx context.Context, ref string) (io.ReadCloser, int64, string, error) {
+	if !s.Enabled() {
+		return nil, 0, "", ErrNotConfigured
+	}
+	r, err := s.resolve(ref)
+	if err != nil {
+		return nil, 0, "", err
+	}
+	if r.remote() {
+		return s.s3.open(ctx, s.bucket(r.info), r.key)
+	}
+	f, err := os.Open(r.file)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, 0, "", ErrNotFound
+	}
+	if err != nil {
+		return nil, 0, "", err
+	}
+	size := int64(-1)
+	if st, err := f.Stat(); err == nil {
+		size = st.Size()
+	}
+	return f, size, "", nil
 }
 
 // Exists reports whether ref is stored.

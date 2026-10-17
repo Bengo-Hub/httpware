@@ -161,6 +161,19 @@ func TestRemotePutURLGetDelete(t *testing.T) {
 		t.Error("empty stays empty, unknown values pass through")
 	}
 
+	rc, size, ctype, err := st.Open(ctx, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	streamed, _ := io.ReadAll(rc)
+	_ = rc.Close()
+	if string(streamed) != "pdf" || size != 3 || ctype != "application/pdf" {
+		t.Errorf("open: %q %d %q", streamed, size, ctype)
+	}
+	if _, _, _, err := st.Open(ctx, "inventory/t1/kyc/missing.pdf"); err != ErrNotFound {
+		t.Errorf("open missing: %v", err)
+	}
+
 	if err := st.Delete(ctx, priv); err != nil {
 		t.Fatal(err)
 	}
