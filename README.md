@@ -208,6 +208,8 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
   redirects public files, keys and old paths alike, to their R2 URL (301), so `<api>/media/...`
   links other services stored keep working once the media volume is gone; private files 404.
 - `URL` returns values it does not understand (an icon name in the same field) unchanged.
+- `Owned(ref)` (v0.9.2): true only for this service's own keys of this layout. Check it before
+  deleting a record's file; legacy files and external URLs may be shared and are left alone.
 
 ## Middleware Details
 

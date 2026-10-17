@@ -363,6 +363,21 @@ func (s *Store) resolve(ref string) (string, keyInfo, error) {
 	return ref, info, err
 }
 
+// Owned reports whether ref (in any form Normalize accepts) is a key this service stored under
+// this layout. Use it before deleting a file when a record is removed: legacy files and external
+// URLs may be shared by several records and are left alone.
+func (s *Store) Owned(ref string) bool {
+	if s == nil {
+		return false
+	}
+	ref = s.Normalize(ref)
+	if !strings.HasPrefix(ref, s.service+"/") || strings.HasPrefix(ref, s.service+"/"+ownerLegacy+"/") {
+		return false
+	}
+	_, err := parseKey(ref)
+	return err == nil
+}
+
 // Normalize turns a value a client sends back into what should be stored: a public URL or a
 // presigned link of this store becomes its key, an old full media URL of this service
 // (WithLegacyBaseURL) becomes the relative "/media/..." path, and anything else (a key, a legacy

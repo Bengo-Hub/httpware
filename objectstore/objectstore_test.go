@@ -182,6 +182,15 @@ func TestNormalizeAndLegacyBaseURL(t *testing.T) {
 			t.Errorf("Normalize(%q) = %q, want %q", in, got, want)
 		}
 	}
+	if !st.Owned(key) || !st.Owned("https://media.example.com/"+key) {
+		t.Error("own keys, in key or URL form, are owned")
+	}
+	for _, ref := range []string{"/media/uploads/menu/x.jpg", "inventory/legacy/public/uploads/x.jpg",
+		"https://cdn.example.com/a.png", "logistics/t1/kyc/a.pdf", "", "coffee"} {
+		if st.Owned(ref) {
+			t.Errorf("%q must not be owned", ref)
+		}
+	}
 	// An old full URL resolves to its copy, and reads it.
 	if u := st.URL("https://inventoryapi.example.com/media/uploads/menu/x.jpg"); u != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
 		t.Errorf("legacy full url %q", u)
