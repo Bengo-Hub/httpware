@@ -203,8 +203,11 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
   anything else is kept. `URL`, `Get` and `Delete` accept all of these forms.
 - `Check(ctx)` (v0.8.1) is a readiness probe: both buckets reachable with the credentials.
 - In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`.
-  Mount `store.LocalHandler()` (v0.8.2, nil with object storage) at `/media`; private files need
-  a link signed by `WithLocalSigner` and are never served without one.
+- Mount `store.MediaHandler()` (v0.9.1) at `/media` in every service. Locally it serves the media
+  root (private files only with a link signed by `WithLocalSigner`). With object storage it
+  redirects public files, keys and old paths alike, to their R2 URL (301), so `<api>/media/...`
+  links other services stored keep working once the media volume is gone; private files 404.
+- `URL` returns values it does not understand (an icon name in the same field) unchanged.
 
 ## Middleware Details
 

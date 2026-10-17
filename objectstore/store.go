@@ -106,17 +106,40 @@ func (s *Store) Check(ctx context.Context) error {
 	}
 }
 
-// LocalHandler serves the local media root in local mode, to be mounted at /media:
+// MediaHandler is what a service mounts at /media:
 //
-//	if h := store.LocalHandler(); h != nil {
+//	if h := store.MediaHandler(); h != nil {
 //		r.Handle("/media/*", http.StripPrefix("/media", h))
 //	}
 //
-// Private files need a signed link (WithLocalSigner; without a signer they are not served at all).
-// It returns nil with object storage configured, where files are served by R2.
-func (s *Store) LocalHandler() http.Handler {
-	if s == nil || s.s3 != nil || s.cfg.LocalRoot == "" {
+// Locally it serves the media root; private files need a link signed by WithLocalSigner (without a
+// signer they are never served). With object storage it permanently redirects public files, both
+// keys and old paths whose copies now live in R2, to their public URL, so links other services
+// stored ("<api>/media/...") keep working after the move; private files answer 404 (a private file
+// is only reachable through a fresh presigned link). It returns nil when nothing is configured.
+func (s *Store) MediaHandler() http.Handler {
+	if s == nil || !s.Enabled() {
 		return nil
+	}
+	if s.s3 != nil {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+				return
+			}
+			rel := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+			ref := rel
+			if _, err := parseKey(rel); err != nil {
+				ref = LegacyPrefix + rel // an old path
+			}
+			_, info, err := s.resolve(ref)
+			if err != nil || !info.public || s.cfg.PublicBaseURL == "" {
+				http.NotFound(w, r)
+				return
+			}
+			w.Header().Set("Cache-Control", "public, max-age=86400")
+			http.Redirect(w, r, s.URL(ref), http.StatusMovedPermanently)
+		})
 	}
 	private := func(name string) bool {
 		key := strings.TrimPrefix(path.Clean("/"+name), "/")
@@ -255,9 +278,13 @@ func (s *Store) Delete(ctx context.Context, ref string) error {
 
 // URL turns a stored reference into a link: a key of a public type gives the public URL, a private
 // one a signed link valid for PresignTTL; a legacy "/media/..." path resolves to its copy; a full
-// http(s) URL is returned as is; "" stays "".
+// http(s) URL is returned as is; "" stays "". A value that is none of these (e.g. an icon name kept
+// in the same field) is returned unchanged, as is everything when no storage is configured.
 func (s *Store) URL(ref string) string {
-	u, _ := s.link(ref, "", 0)
+	u, err := s.link(ref, "", 0)
+	if err != nil {
+		return strings.TrimSpace(ref)
+	}
 	return u
 }
 

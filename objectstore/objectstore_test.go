@@ -260,7 +260,7 @@ func TestLocalMode(t *testing.T) {
 		t.Errorf("legacy local url %q", u)
 	}
 	// The local handler serves public files freely, private ones only with a valid signature.
-	h := st.LocalHandler()
+	h := st.MediaHandler()
 	if h == nil {
 		t.Fatal("local mode must offer a handler")
 	}
@@ -283,12 +283,46 @@ func TestLocalMode(t *testing.T) {
 	}
 	unsignedStore, _ := New("logistics", Config{LocalRoot: root})
 	rec := httptest.NewRecorder()
-	http.StripPrefix("/media", unsignedStore.LocalHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+k, nil))
+	http.StripPrefix("/media", unsignedStore.MediaHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+k, nil))
 	if rec.Code != http.StatusNotFound {
 		t.Error("without a signer private files are never served")
 	}
-	if remote, _ := remoteStore(t); remote.LocalHandler() != nil {
-		t.Error("remote stores serve nothing locally")
+
+	// With object storage, public files (keys and old paths) redirect to R2, private ones 404.
+	remote, _ := remoteStore(t, WithLegacyPrivate(func(rel string) bool { return strings.HasPrefix(rel, "kyc/") }))
+	rh := remote.MediaHandler()
+	get := func(target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		http.StripPrefix("/media", rh).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec
+	}
+	if rec := get("/media/uploads/menu/x.jpg"); rec.Code != http.StatusMovedPermanently ||
+		rec.Header().Get("Location") != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
+		t.Errorf("old public path must redirect: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	rk, _ := remote.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
+	if rec := get("/media/" + rk); rec.Code != http.StatusMovedPermanently ||
+		rec.Header().Get("Location") != "https://media.example.com/"+rk {
+		t.Errorf("public key must redirect: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	if get("/media/kyc/a.pdf").Code != http.StatusNotFound {
+		t.Error("an old private path must not redirect")
+	}
+	pk, _ := remote.Key(Owner{TenantID: "t1"}, TypeKYC, "a.pdf")
+	if get("/media/"+pk).Code != http.StatusNotFound {
+		t.Error("a private key must not redirect")
+	}
+	// A climbing path is cleaned first, so it can only point inside this service's public prefix.
+	if rec := get("/media/../../etc/passwd"); rec.Code == http.StatusMovedPermanently &&
+		!strings.HasPrefix(rec.Header().Get("Location"), "https://media.example.com/inventory/legacy/public/") {
+		t.Errorf("climbing path escaped: %q", rec.Header().Get("Location"))
+	}
+	if none, _ := New("x", Config{}); none.MediaHandler() != nil {
+		t.Error("nothing configured, nothing to serve")
+	}
+	// Values the store does not understand pass through URL unchanged.
+	if remote.URL("coffee") != "coffee" {
+		t.Error("an icon name must pass through")
 	}
 
 	if err := st.Delete(ctx, k); err != nil {
