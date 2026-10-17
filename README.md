@@ -156,6 +156,49 @@ Two small packages so every service treats phone numbers and email addresses the
 
 Only services that import `contact` pull in `nyaruka/phonenumbers`.
 
+### Object storage: `objectstore` (v0.8.0)
+
+`github.com/Bengo-Hub/httpware/objectstore` is the one place every service stores files (media,
+documents, exports, backups), on Cloudflare R2 or any S3 compatible store. No SDK: requests are
+signed with SigV4 on net/http (checked byte for byte against the AWS SDK signer).
+
+Configuration, the same in every namespace (one Kubernetes Secret, `object-storage`):
+
+| Env | Meaning |
+|---|---|
+| `OBJECT_STORAGE_ENDPOINT` | S3 API endpoint, e.g. `https://<account>.r2.cloudflarestorage.com` |
+| `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` | credentials |
+| `OBJECT_STORAGE_PUBLIC_BUCKET`, `OBJECT_STORAGE_PRIVATE_BUCKET` | the two buckets |
+| `OBJECT_STORAGE_PUBLIC_BASE_URL` | domain serving the public bucket (Cloudflare cached) |
+| `OBJECT_STORAGE_REGION` | signing region, default `auto` (R2) |
+| `OBJECT_STORAGE_PRESIGN_TTL` | private link lifetime, default `15m` |
+| `OBJECT_STORAGE_AUTO_CREATE_BUCKETS` | create missing buckets (local S3 only) |
+| `MEDIA_ROOT`, `MEDIA_URL_BASE` | local fallback when no endpoint is set (development) |
+
+Keys are `<service>/<tenant_id>/<media_type>/<yyyy>/<mm>/<uuid>.<ext>`, or
+`<service>/users/<user_id>/<media_type>/...` for personal media such as avatars. The media type
+(`avatars`, `logos`, `item-images`, `menu-images`, `covers`, `images`, `attachments`, `documents`,
+`kyc`, `patient-photos`, `signatures`, `exports`, `backups`, `ebooks`; `Register` adds more)
+decides the bucket, the size limit, the accepted types and whether images are re-encoded (EXIF and
+trailing bytes removed).
+
+```go
+store, _ := objectstore.New("inventory", objectstore.FromEnv())
+up, err := objectstore.ReadUpload(w, r, "file", objectstore.TypeItemImages) // 400 when IsUploadError
+key, _ := store.NewKey(objectstore.Owner{TenantID: tenantID}, objectstore.TypeItemImages, up.Ext)
+_ = store.Put(ctx, key, up.Data, up.ContentType)
+// save key; on read:
+item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for private types
+```
+
+- Store the key, never a link. `URL` gives the public URL (cached for a year: keys never change
+  content) or a presigned link; full `http(s)` URLs pass through.
+- Old local paths `/media/<rel>` keep working: they resolve to `<service>/legacy/<public|private>/<rel>`
+  (`WithLegacyPrivate` names the private ones), where `CopyLegacyTree` copies a service's old media
+  directory once. It is idempotent, so a stopped copy is simply run again.
+- In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`
+  (serve it with `StaticMedia`; `WithLocalSigner` signs private links).
+
 ## Middleware Details
 
 ### RequestID
