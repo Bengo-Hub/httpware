@@ -9,10 +9,7 @@ import (
 	"github.com/google/uuid"
 )
 
-const (
-	ownerUsers  = "users"
-	ownerLegacy = "legacy"
-)
+const ownerUsers = "users"
 
 var segmentRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
@@ -81,29 +78,19 @@ func newObjectName(ext string) string {
 	return fmt.Sprintf("%04d/%02d/%s%s", now.Year(), now.Month(), uuid.NewString(), ext)
 }
 
-// keyInfo describes a key: whether it is a legacy copy, and its media type and visibility.
+// keyInfo describes a key: its media type and visibility.
 type keyInfo struct {
 	mediaType string
 	public    bool
 }
 
-// parseKey reads the media type (and so the bucket) from a key built by this package, or from a
-// legacy key <service>/legacy/<public|private>/<old path>.
+// parseKey reads the media type (and so the bucket) from a key built by this package.
 func parseKey(key string) (keyInfo, error) {
 	segs := strings.Split(key, "/")
 	for _, s := range segs {
-		if s == "" || s == "." || s == ".." {
+		if !validSegment(s) {
 			return keyInfo{}, fmt.Errorf("objectstore: invalid key %q", key)
 		}
-	}
-	if len(segs) >= 4 && segs[1] == ownerLegacy {
-		switch segs[2] {
-		case "public":
-			return keyInfo{public: true}, nil
-		case "private":
-			return keyInfo{}, nil
-		}
-		return keyInfo{}, fmt.Errorf("objectstore: invalid legacy key %q", key)
 	}
 	typeAt := 2
 	if len(segs) > 1 && segs[1] == ownerUsers {

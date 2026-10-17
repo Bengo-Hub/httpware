@@ -193,23 +193,31 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 
 - Store the key, never a link. `URL` gives the public URL (cached for a year: keys never change
   content) or a presigned link; full `http(s)` URLs pass through.
-- Old local paths `/media/<rel>` keep working: they resolve to `<service>/legacy/<public|private>/<rel>`
-  (`WithLegacyPrivate` names the private ones), where `CopyLegacyTree` copies a service's old media
-  directory once. It is idempotent, so a stopped copy is simply run again.
-- `WithLegacyBaseURL(oldMediaURLBase)` (v0.9.0): stored full URLs `<old base>/media/<rel>` resolve
-  the same way, so rows written with an absolute media URL need no rewrite either.
-- `Normalize(ref)` (v0.9.0): call it before saving a file field a client sends back. A public
-  URL or presigned link of the store becomes its key, an old full media URL becomes `/media/<rel>`,
-  anything else is kept. `URL`, `Get` and `Delete` accept all of these forms.
-- `Check(ctx)` (v0.8.1) is a readiness probe: both buckets reachable with the credentials.
-- In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`.
-- Mount `store.MediaHandler()` (v0.9.1) at `/media` in every service. Locally it serves the media
-  root (private files only with a link signed by `WithLocalSigner`). With object storage it
-  redirects public files, keys and old paths alike, to their R2 URL (301), so `<api>/media/...`
-  links other services stored keep working once the media volume is gone; private files 404.
 - `URL` returns values it does not understand (an icon name in the same field) unchanged.
-- `Owned(ref)` (v0.9.2): true only for this service's own keys of this layout. Check it before
-  deleting a record's file; legacy files and external URLs may be shared and are left alone.
+- `Normalize(ref)`: call it before saving a file field a client sends back. A public URL or
+  presigned link of the store becomes its key, a full media URL of the service (`MEDIA_URL_BASE`,
+  or other old bases given with `WithLegacyBaseURL`) becomes its key or `/media/<rel>` path,
+  anything else is kept. `URL`, `Get`, `Exists` and `Delete` accept all of these forms.
+- `Owned(ref)`: true only for this service's own keys. Check it before deleting a record's file;
+  old volume files and external URLs may be shared and are left alone.
+- `Check(ctx)` is a readiness probe: both buckets reachable with the credentials.
+- Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files
+  in local mode, and old `/media/<rel>` paths not yet relinked; private ones, named by
+  `WithLegacyPrivate`, only with a link signed by `WithLocalSigner`). With object storage a public
+  key redirects (301) to its R2 URL and a private key answers 404.
+
+Moving existing media (v0.10.0). Old values (`/media/<rel>` or `<MEDIA_URL_BASE>/media/<rel>`) keep
+working from the volume until each row is relinked:
+
+```go
+rl := store.NewRelinker()
+key, changed, err := rl.Relink(ctx, brand.LogoURL, objectstore.Owner{TenantID: brand.TenantID.String()}, objectstore.TypeLogos)
+// changed: save key on the row. errors.Is(err, objectstore.ErrNotFound): the file is gone, report it.
+```
+
+Each referenced file is uploaded under its owner with a content hash name, so one file used by many
+rows is stored once and a rerun uploads nothing twice. Files no row references are never moved and
+go away with the volume, which is released once every row is relinked.
 
 ## Middleware Details
 

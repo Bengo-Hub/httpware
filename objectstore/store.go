@@ -16,6 +16,8 @@ import (
 )
 
 // LegacyPrefix is how services stored local media paths before object storage ("/media/...").
+// Such a file stays on the service's media volume, served at <MEDIA_URL_BASE>/media/..., until a
+// Relinker moves it to its key and the row is updated.
 const LegacyPrefix = "/media/"
 
 // Store reads and writes one service's files. It is safe for concurrent use.
@@ -32,19 +34,19 @@ type Store struct {
 // Option tunes a Store.
 type Option func(*Store)
 
-// WithLocalSigner signs private links in local mode, matching httpware.StaticMedia's Signer.
+// WithLocalSigner signs links to private files served from the media volume (local mode, and
+// old private paths not yet relinked), matching httpware.StaticMedia's Signer.
 func WithLocalSigner(s *httpware.MediaSigner) Option { return func(st *Store) { st.signer = s } }
 
-// WithLegacyPrivate marks which old "/media/<rel>" paths held private files (for example KYC),
-// so they resolve to the private bucket after the one-time copy. Default: none.
+// WithLegacyPrivate marks which old "/media/<rel>" paths hold private files (for example KYC), so
+// they are only served with a signed link. Default: none.
 func WithLegacyPrivate(f func(rel string) bool) Option {
 	return func(st *Store) { st.legacyPrivate = f }
 }
 
-// WithLegacyBaseURL names the origins a service used to put in front of its "/media/..." paths
-// (its old MEDIA_URL_BASE, e.g. https://inventoryapi.codevertexafrica.com), so a stored full URL
-// "<base>/media/<rel>" resolves like the relative legacy path "/media/<rel>". Empty values are
-// ignored.
+// WithLegacyBaseURL names other origins a service used to put in front of its "/media/..." paths,
+// so a stored full URL "<base>/media/<rel>" is read as the legacy path "/media/<rel>". The
+// configured MEDIA_URL_BASE is always one of them. Empty values are ignored.
 func WithLegacyBaseURL(bases ...string) Option {
 	return func(st *Store) {
 		for _, b := range bases {
@@ -112,53 +114,46 @@ func (s *Store) Check(ctx context.Context) error {
 //		r.Handle("/media/*", http.StripPrefix("/media", h))
 //	}
 //
-// Locally it serves the media root; private files need a link signed by WithLocalSigner (without a
-// signer they are never served). With object storage it permanently redirects public files, both
-// keys and old paths whose copies now live in R2, to their public URL, so links other services
-// stored ("<api>/media/...") keep working after the move; private files answer 404 (a private file
-// is only reachable through a fresh presigned link). It returns nil when nothing is configured.
+// It serves the media volume (MEDIA_ROOT): new files in local mode, and old paths not yet relinked
+// in both modes, private ones only with a link signed by WithLocalSigner. With object storage, a
+// key of a public type is permanently redirected to its public URL; a private key answers 404 (it is
+// only reachable through a fresh presigned link). It returns nil when there is nothing to serve.
 func (s *Store) MediaHandler() http.Handler {
 	if s == nil || !s.Enabled() {
 		return nil
 	}
-	if s.s3 != nil {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.Method != http.MethodGet && r.Method != http.MethodHead {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			rel := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
-			ref := rel
-			if _, err := parseKey(rel); err != nil {
-				ref = LegacyPrefix + rel // an old path
-			}
-			_, info, err := s.resolve(ref)
-			if err != nil || !info.public || s.cfg.PublicBaseURL == "" {
-				http.NotFound(w, r)
-				return
-			}
-			w.Header().Set("Cache-Control", "public, max-age=86400")
-			http.Redirect(w, r, s.URL(ref), http.StatusMovedPermanently)
-		})
-	}
-	private := func(name string) bool {
-		key := strings.TrimPrefix(path.Clean("/"+name), "/")
-		if info, err := parseKey(key); err == nil {
-			return !info.public
-		}
-		return s.legacyPrivate(key)
-	}
-	h := httpware.StaticMedia(s.cfg.LocalRoot, httpware.MediaOptions{Private: private, Signer: s.signer})
-	if s.signer != nil {
-		return h
+	var files http.Handler
+	if s.cfg.LocalRoot != "" {
+		files = httpware.StaticMedia(s.cfg.LocalRoot, httpware.MediaOptions{Private: s.privatePath, Signer: s.signer})
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if private(r.URL.Path) {
+		rel := strings.TrimPrefix(path.Clean("/"+r.URL.Path), "/")
+		if s.s3 != nil {
+			if info, err := parseKey(rel); err == nil {
+				if !info.public || s.cfg.PublicBaseURL == "" {
+					http.NotFound(w, r)
+					return
+				}
+				w.Header().Set("Cache-Control", "public, max-age=86400")
+				http.Redirect(w, r, s.cfg.PublicBaseURL+"/"+awsURIEncode(rel, true), http.StatusMovedPermanently)
+				return
+			}
+		}
+		if files == nil || (s.signer == nil && s.privatePath(rel)) {
 			http.NotFound(w, r)
 			return
 		}
-		h.ServeHTTP(w, r)
+		files.ServeHTTP(w, r)
 	})
+}
+
+// privatePath reports whether a path below the media root holds a private file.
+func (s *Store) privatePath(name string) bool {
+	rel := strings.TrimPrefix(path.Clean("/"+name), "/")
+	if info, err := parseKey(rel); err == nil {
+		return !info.public
+	}
+	return s.legacyPrivate(rel)
 }
 
 // Key builds the key of a named object, for callers that choose the name (a content hash, a record
@@ -190,37 +185,34 @@ func (s *Store) Put(ctx context.Context, key string, data []byte, contentType st
 		}
 		return s.s3.put(ctx, s.bucket(info), key, data, contentType, cc)
 	}
-	path, err := s.localPath(key)
+	p, err := s.localPath(key)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 		return fmt.Errorf("objectstore: %w", err)
 	}
-	tmp := path + ".tmp"
+	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
 		return fmt.Errorf("objectstore: %w", err)
 	}
-	return os.Rename(tmp, path)
+	return os.Rename(tmp, p)
 }
 
-// Get returns the stored bytes and content type. ref may be a key or a legacy "/media/..." path.
+// Get returns the stored bytes and content type of a key, or of a legacy path (read from the
+// media volume). Local files report no content type.
 func (s *Store) Get(ctx context.Context, ref string) ([]byte, string, error) {
 	if !s.Enabled() {
 		return nil, "", ErrNotConfigured
 	}
-	key, info, err := s.resolve(ref)
+	r, err := s.resolve(ref)
 	if err != nil {
 		return nil, "", err
 	}
-	if s.s3 != nil {
-		return s.s3.get(ctx, s.bucket(info), key)
+	if r.remote() {
+		return s.s3.get(ctx, s.bucket(r.info), r.key)
 	}
-	path, err := s.localPathRef(ref, key)
-	if err != nil {
-		return nil, "", err
-	}
-	b, err := os.ReadFile(path)
+	b, err := os.ReadFile(r.file)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, "", ErrNotFound
 	}
@@ -232,25 +224,22 @@ func (s *Store) Exists(ctx context.Context, ref string) (bool, error) {
 	if !s.Enabled() {
 		return false, ErrNotConfigured
 	}
-	key, info, err := s.resolve(ref)
+	r, err := s.resolve(ref)
 	if err != nil {
 		return false, err
 	}
-	if s.s3 != nil {
-		return s.s3.exists(ctx, s.bucket(info), key)
+	if r.remote() {
+		return s.s3.exists(ctx, s.bucket(r.info), r.key)
 	}
-	path, err := s.localPathRef(ref, key)
-	if err != nil {
-		return false, err
-	}
-	_, err = os.Stat(path)
+	_, err = os.Stat(r.file)
 	if errors.Is(err, os.ErrNotExist) {
 		return false, nil
 	}
 	return err == nil, err
 }
 
-// Delete removes ref; a missing file is not an error. Full http URLs (not ours) are ignored.
+// Delete removes ref; a missing file is not an error. External URLs are ignored. Check Owned
+// first when the file may be shared by other records.
 func (s *Store) Delete(ctx context.Context, ref string) error {
 	ref = s.Normalize(ref)
 	if isExternal(ref) || ref == "" {
@@ -259,27 +248,24 @@ func (s *Store) Delete(ctx context.Context, ref string) error {
 	if !s.Enabled() {
 		return ErrNotConfigured
 	}
-	key, info, err := s.resolve(ref)
+	r, err := s.resolve(ref)
 	if err != nil {
 		return err
 	}
-	if s.s3 != nil {
-		return s.s3.del(ctx, s.bucket(info), key)
+	if r.remote() {
+		return s.s3.del(ctx, s.bucket(r.info), r.key)
 	}
-	path, err := s.localPathRef(ref, key)
-	if err != nil {
-		return err
-	}
-	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := os.Remove(r.file); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
 // URL turns a stored reference into a link: a key of a public type gives the public URL, a private
-// one a signed link valid for PresignTTL; a legacy "/media/..." path resolves to its copy; a full
-// http(s) URL is returned as is; "" stays "". A value that is none of these (e.g. an icon name kept
-// in the same field) is returned unchanged, as is everything when no storage is configured.
+// one a signed link valid for PresignTTL; a legacy "/media/..." path gives its address on the
+// service's media route; a full http(s) URL is returned as is; "" stays "". A value that is none of
+// these (e.g. an icon name kept in the same field) is returned unchanged, as is everything when no
+// storage is configured.
 func (s *Store) URL(ref string) string {
 	u, err := s.link(ref, "", 0)
 	if err != nil {
@@ -301,77 +287,87 @@ func (s *Store) link(ref, downloadName string, ttl time.Duration) (string, error
 	if s == nil || !s.Enabled() {
 		return "", ErrNotConfigured
 	}
-	key, info, err := s.resolve(ref)
+	r, err := s.resolve(ref)
 	if err != nil {
 		return "", err
 	}
 	if ttl <= 0 {
 		ttl = s.cfg.PresignTTL
 	}
-	if s.s3 != nil {
-		if info.public && downloadName == "" && s.cfg.PublicBaseURL != "" {
-			return s.cfg.PublicBaseURL + "/" + awsURIEncode(key, true), nil
+	if r.remote() {
+		if r.info.public && downloadName == "" && s.cfg.PublicBaseURL != "" {
+			return s.cfg.PublicBaseURL + "/" + awsURIEncode(r.key, true), nil
 		}
-		return s.s3.presignGet(s.bucket(info), key, downloadName, ttl), nil
+		return s.s3.presignGet(s.bucket(r.info), r.key, downloadName, ttl), nil
 	}
-	// Local: the service serves LocalRoot at <LocalURLBase>/media (httpware.StaticMedia).
-	u := s.cfg.LocalURLBase + LegacyPrefix + awsURIEncode(key, true)
-	if strings.HasPrefix(ref, LegacyPrefix) {
-		u = s.cfg.LocalURLBase + ref
-	}
-	if !info.public && s.signer != nil {
+	// A file on the media volume, served at <LocalURLBase>/media by MediaHandler.
+	u := s.cfg.LocalURLBase + LegacyPrefix + awsURIEncode(r.rel, true)
+	if !r.info.public && s.signer != nil {
 		u = s.signer.Sign(u)
 	}
 	return u, nil
 }
 
-// LegacyKey is where a file stored at the old local path "/media/<rel>" lives in object storage.
-func (s *Store) LegacyKey(rel string) (string, error) {
-	rel = strings.TrimPrefix(strings.TrimPrefix(strings.TrimSpace(rel), LegacyPrefix), "/")
-	if rel == "" {
-		return "", fmt.Errorf("objectstore: empty legacy path")
-	}
-	for _, seg := range strings.Split(rel, "/") {
-		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, ".") {
-			return "", fmt.Errorf("objectstore: invalid legacy path %q", rel)
-		}
-	}
-	vis := "public"
-	if s.legacyPrivate(rel) {
-		vis = "private"
-	}
-	return s.service + "/" + ownerLegacy + "/" + vis + "/" + rel, nil
+// resolved is where a reference lives: an object (remote mode key) or a file on the media volume
+// (local mode key, or a legacy path in either mode).
+type resolved struct {
+	key  string // object key, "" for a legacy path
+	rel  string // path below the media root (local files)
+	file string // absolute local path (local files)
+	info keyInfo
+	s3   bool
 }
 
-// resolve maps a reference to its key and kind. Legacy paths, and keys of this or any service, are
-// accepted, so a service can read a file another one stored when handed its key.
-func (s *Store) resolve(ref string) (string, keyInfo, error) {
+func (r resolved) remote() bool { return r.s3 }
+
+// resolve maps a reference to where it is stored. Keys of this or any service are accepted, so a
+// service can read a file another one stored when handed its key.
+func (s *Store) resolve(ref string) (resolved, error) {
 	ref = s.Normalize(ref)
 	if strings.HasPrefix(ref, LegacyPrefix) {
 		rel := strings.SplitN(strings.TrimPrefix(ref, LegacyPrefix), "?", 2)[0]
 		if dec, err := url.PathUnescape(rel); err == nil {
 			rel = dec
 		}
-		key, err := s.LegacyKey(rel)
-		if err != nil {
-			return "", keyInfo{}, err
+		if s.cfg.LocalRoot == "" {
+			return resolved{}, fmt.Errorf("objectstore: %s is on the media volume but MEDIA_ROOT is not set", ref)
 		}
-		info, err := parseKey(key)
-		return key, info, err
+		file, err := s.localPath(rel)
+		if err != nil {
+			return resolved{}, err
+		}
+		rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+		return resolved{rel: rel, file: file, info: keyInfo{public: !s.legacyPrivate(rel)}}, nil
 	}
 	info, err := parseKey(ref)
-	return ref, info, err
+	if err != nil {
+		return resolved{}, err
+	}
+	if s.s3 != nil {
+		return resolved{key: ref, info: info, s3: true}, nil
+	}
+	file, err := s.localPath(ref)
+	if err != nil {
+		return resolved{}, err
+	}
+	return resolved{key: ref, rel: ref, file: file, info: info}, nil
 }
 
-// Owned reports whether ref (in any form Normalize accepts) is a key this service stored under
-// this layout. Use it before deleting a file when a record is removed: legacy files and external
-// URLs may be shared by several records and are left alone.
+// IsLegacy reports whether ref (in any form Normalize accepts) is an old media volume path that a
+// Relinker should move.
+func (s *Store) IsLegacy(ref string) bool {
+	return strings.HasPrefix(s.Normalize(ref), LegacyPrefix)
+}
+
+// Owned reports whether ref (in any form Normalize accepts) is a key this service stored. Use it
+// before deleting a file when a record is removed: legacy files and external URLs may be shared by
+// several records and are left alone.
 func (s *Store) Owned(ref string) bool {
 	if s == nil {
 		return false
 	}
 	ref = s.Normalize(ref)
-	if !strings.HasPrefix(ref, s.service+"/") || strings.HasPrefix(ref, s.service+"/"+ownerLegacy+"/") {
+	if !strings.HasPrefix(ref, s.service+"/") {
 		return false
 	}
 	_, err := parseKey(ref)
@@ -379,9 +375,9 @@ func (s *Store) Owned(ref string) bool {
 }
 
 // Normalize turns a value a client sends back into what should be stored: a public URL or a
-// presigned link of this store becomes its key, an old full media URL of this service
-// (WithLegacyBaseURL) becomes the relative "/media/..." path, and anything else (a key, a legacy
-// path, an external URL, "") is returned as it is. Use it before saving image or file fields.
+// presigned link of this store becomes its key, a full media URL of this service (MEDIA_URL_BASE or
+// WithLegacyBaseURL) becomes its key or relative "/media/..." path, and anything else (a key, a
+// legacy path, an external URL, "") is returned as it is. Use it before saving file fields.
 func (s *Store) Normalize(ref string) string {
 	ref = strings.TrimSpace(ref)
 	if s == nil || !isExternal(ref) || strings.HasPrefix(strings.ToLower(ref), "data:") {
@@ -396,14 +392,14 @@ func (s *Store) Normalize(ref string) string {
 		return ref
 	}
 	origin := strings.ToLower(u.Scheme + "://" + u.Host)
-	if s.cfg.PublicBaseURL != "" && strings.EqualFold(origin, s.originOf(s.cfg.PublicBaseURL)) {
+	if s.cfg.PublicBaseURL != "" && origin == originOf(s.cfg.PublicBaseURL) {
 		if key := strings.TrimPrefix(p, "/"); key != "" {
 			if _, err := parseKey(key); err == nil {
 				return key
 			}
 		}
 	}
-	if s.s3 != nil && strings.EqualFold(origin, strings.ToLower(s.s3.endpoint.Scheme+"://"+s.s3.endpoint.Host)) {
+	if s.s3 != nil && origin == strings.ToLower(s.s3.endpoint.Scheme+"://"+s.s3.endpoint.Host) {
 		for _, b := range []string{s.cfg.PublicBucket, s.cfg.PrivateBucket} {
 			if key := strings.TrimPrefix(p, "/"+b+"/"); key != p {
 				if _, err := parseKey(key); err == nil {
@@ -412,29 +408,27 @@ func (s *Store) Normalize(ref string) string {
 			}
 		}
 	}
-	local := strings.ToLower(s.cfg.LocalURLBase)
-	for _, b := range append([]string{local}, s.legacyBases...) {
-		if b == "" || origin != s.originOf(b) {
+	for _, b := range append([]string{strings.ToLower(s.cfg.LocalURLBase)}, s.legacyBases...) {
+		if b == "" || origin != originOf(b) {
 			continue
 		}
-		basePath := strings.TrimSuffix(strings.TrimPrefix(b, s.originOf(b)), "/")
+		basePath := strings.TrimSuffix(strings.TrimPrefix(b, originOf(b)), "/")
 		rest := strings.TrimPrefix(p, basePath)
-		if strings.HasPrefix(rest, LegacyPrefix) {
-			if b == local {
-				// A local link of this store: a key, or an old relative path.
-				if key := strings.TrimPrefix(rest, LegacyPrefix); key != "" {
-					if _, err := parseKey(key); err == nil {
-						return key
-					}
-				}
-			}
-			return rest
+		if !strings.HasPrefix(rest, LegacyPrefix) {
+			continue
 		}
+		// A key served by MediaHandler (local mode, or its redirect), else an old path.
+		if key := strings.TrimPrefix(rest, LegacyPrefix); key != "" {
+			if _, err := parseKey(key); err == nil {
+				return key
+			}
+		}
+		return rest
 	}
 	return ref
 }
 
-func (s *Store) originOf(raw string) string {
+func originOf(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return ""
@@ -449,26 +443,23 @@ func (s *Store) bucket(info keyInfo) string {
 	return s.cfg.PrivateBucket
 }
 
-// localPath is where key lives in local mode: LocalRoot/<key>.
-func (s *Store) localPath(key string) (string, error) {
+// localPath is where a path below the media root lives: LocalRoot/<rel>. Dotfiles and paths
+// climbing out of the root are refused.
+func (s *Store) localPath(rel string) (string, error) {
 	root, err := filepath.Abs(s.cfg.LocalRoot)
 	if err != nil {
 		return "", err
 	}
-	p := filepath.Join(root, filepath.FromSlash(key))
+	for _, seg := range strings.Split(strings.Trim(rel, "/"), "/") {
+		if seg == "" || strings.HasPrefix(seg, ".") {
+			return "", fmt.Errorf("objectstore: invalid media path %q", rel)
+		}
+	}
+	p := filepath.Join(root, filepath.FromSlash(rel))
 	if !strings.HasPrefix(p, root+string(filepath.Separator)) {
-		return "", fmt.Errorf("objectstore: key escapes the media root")
+		return "", fmt.Errorf("objectstore: path escapes the media root")
 	}
 	return p, nil
-}
-
-// localPathRef is the local file of ref: a legacy path stays where it always was.
-func (s *Store) localPathRef(ref, key string) (string, error) {
-	if ref = s.Normalize(ref); strings.HasPrefix(ref, LegacyPrefix) {
-		rel := strings.SplitN(strings.TrimPrefix(ref, LegacyPrefix), "?", 2)[0]
-		return s.localPath(rel)
-	}
-	return s.localPath(key)
 }
 
 func isExternal(ref string) bool {

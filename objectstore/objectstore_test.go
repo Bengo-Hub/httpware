@@ -25,6 +25,7 @@ type fakeS3 struct {
 	mu      sync.Mutex
 	objects map[string][]byte // bucket/key
 	headers map[string]http.Header
+	puts    int
 }
 
 func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
@@ -42,6 +43,7 @@ func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
 			b, _ := io.ReadAll(r.Body)
 			f.objects[p] = b
 			f.headers[p] = r.Header.Clone()
+			f.puts++
 		case http.MethodGet, http.MethodHead:
 			b, ok := f.objects[p]
 			if !ok {
@@ -61,11 +63,13 @@ func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
 	return f, srv
 }
 
-func remoteStore(t *testing.T, opts ...Option) (*Store, *fakeS3) {
+// remoteStore is an "inventory" store on a fake S3, with a media volume at root (may be "").
+func remoteStore(t *testing.T, root string, opts ...Option) (*Store, *fakeS3) {
 	f, srv := newFakeS3(t)
 	st, err := New("inventory", Config{
 		Endpoint: srv.URL, AccessKeyID: "AK", SecretAccessKey: "SK",
 		PublicBucket: "pub", PrivateBucket: "priv", PublicBaseURL: "https://media.example.com/",
+		LocalRoot: root, LocalURLBase: "https://inventoryapi.example.com",
 	}, opts...)
 	if err != nil {
 		t.Fatal(err)
@@ -73,8 +77,19 @@ func remoteStore(t *testing.T, opts ...Option) (*Store, *fakeS3) {
 	return st, f
 }
 
+func writeFile(t *testing.T, root, rel, body string) {
+	t.Helper()
+	p := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestKeys(t *testing.T) {
-	st, _ := remoteStore(t)
+	st, _ := remoteStore(t, "")
 	k, err := st.NewKey(Owner{TenantID: "t1"}, TypeItemImages, "jpg")
 	if err != nil || !strings.HasPrefix(k, "inventory/t1/item-images/") || !strings.HasSuffix(k, ".jpg") {
 		t.Fatalf("new key %q %v", k, err)
@@ -92,6 +107,7 @@ func TestKeys(t *testing.T) {
 		{Owner{TenantID: "t", UserID: "u"}, TypeItemImages, "a"},
 		{Owner{TenantID: "t"}, "nope", "a"},
 		{Owner{TenantID: "t"}, TypeItemImages, "../../etc"},
+		{Owner{TenantID: "t1"}, TypeItemImages, "a b.jpg"},
 	} {
 		if _, err := st.Key(bad.o, bad.t, bad.p); err == nil {
 			t.Errorf("expected an error for %+v", bad)
@@ -100,12 +116,10 @@ func TestKeys(t *testing.T) {
 }
 
 func TestRemotePutURLGetDelete(t *testing.T) {
-	st, f := remoteStore(t, WithLegacyPrivate(func(rel string) bool { return strings.HasPrefix(rel, "kyc/") }))
+	root := t.TempDir()
+	st, f := remoteStore(t, root, WithLegacyPrivate(func(rel string) bool { return strings.HasPrefix(rel, "kyc/") }))
 	ctx := context.Background()
 
-	if _, err := st.Key(Owner{TenantID: "t1"}, TypeItemImages, "a b.jpg"); err == nil {
-		t.Error("spaces are not allowed in keys")
-	}
 	pub, _ := st.Key(Owner{TenantID: "t1"}, TypeItemImages, "2026/10/a_b.jpg")
 	if err := st.Put(ctx, pub, []byte("img"), "image/jpeg"); err != nil {
 		t.Fatal(err)
@@ -132,18 +146,19 @@ func TestRemotePutURLGetDelete(t *testing.T) {
 		t.Fatalf("get %q %q %v", b, ct, err)
 	}
 
-	// Legacy paths resolve to their copies, private ones to the private bucket.
-	if u := st.URL("/media/uploads/menu/x.jpg"); u != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
-		t.Errorf("legacy public %q", u)
+	// Old paths not relinked yet stay on the volume and keep their address on the media route.
+	writeFile(t, root, "uploads/menu/x.jpg", "old")
+	if u := st.URL("/media/uploads/menu/x.jpg"); u != "https://inventoryapi.example.com/media/uploads/menu/x.jpg" {
+		t.Errorf("legacy url %q", u)
 	}
-	if u := st.URL("/media/kyc/doc.pdf"); !strings.Contains(u, "/priv/inventory/legacy/private/kyc/doc.pdf?") {
-		t.Errorf("legacy private %q", u)
+	if b, _, err := st.Get(ctx, "/media/uploads/menu/x.jpg"); err != nil || string(b) != "old" {
+		t.Errorf("legacy get %q %v", b, err)
 	}
 	if u := st.URL("https://cdn.example.com/a.png"); u != "https://cdn.example.com/a.png" {
 		t.Error("external URLs pass through")
 	}
-	if st.URL("") != "" {
-		t.Error("empty stays empty")
+	if st.URL("") != "" || st.URL("coffee") != "coffee" {
+		t.Error("empty stays empty, unknown values pass through")
 	}
 
 	if err := st.Delete(ctx, priv); err != nil {
@@ -160,15 +175,17 @@ func TestRemotePutURLGetDelete(t *testing.T) {
 	}
 }
 
-func TestNormalizeAndLegacyBaseURL(t *testing.T) {
-	st, f := remoteStore(t, WithLegacyBaseURL("https://inventoryapi.example.com/", ""))
+func TestNormalizeOwnedIsLegacy(t *testing.T) {
+	st, _ := remoteStore(t, t.TempDir(), WithLegacyBaseURL("http://localhost:4005/", ""))
 	key, _ := st.Key(Owner{TenantID: "t1"}, TypeItemImages, "2026/10/a.jpg")
 	priv, _ := st.Key(Owner{TenantID: "t1"}, TypeKYC, "id.pdf")
 	cases := map[string]string{
-		"https://media.example.com/" + key: key, // public URL back to its key
-		st.URL(priv):                       priv,
+		"https://media.example.com/" + key:                              key,
+		st.URL(priv):                                                    priv,
+		"https://inventoryapi.example.com/media/" + key:                 key,
 		"https://inventoryapi.example.com/media/uploads/menu/x.jpg":     "/media/uploads/menu/x.jpg",
 		"https://INVENTORYAPI.example.com/media/uploads/menu/x.jpg?v=1": "/media/uploads/menu/x.jpg",
+		"http://localhost:4005/media/uploads/x.png":                     "/media/uploads/x.png",
 		"https://inventoryapi.example.com/api/v1/other":                 "https://inventoryapi.example.com/api/v1/other",
 		"https://cdn.example.com/a.png":                                 "https://cdn.example.com/a.png",
 		"https://media.example.com/not/a/valid":                         "https://media.example.com/not/a/valid",
@@ -185,78 +202,56 @@ func TestNormalizeAndLegacyBaseURL(t *testing.T) {
 	if !st.Owned(key) || !st.Owned("https://media.example.com/"+key) {
 		t.Error("own keys, in key or URL form, are owned")
 	}
-	for _, ref := range []string{"/media/uploads/menu/x.jpg", "inventory/legacy/public/uploads/x.jpg",
-		"https://cdn.example.com/a.png", "logistics/t1/kyc/a.pdf", "", "coffee"} {
+	for _, ref := range []string{"/media/uploads/menu/x.jpg", "https://cdn.example.com/a.png", "logistics/t1/kyc/a.pdf", "", "coffee"} {
 		if st.Owned(ref) {
 			t.Errorf("%q must not be owned", ref)
 		}
 	}
-	// An old full URL resolves to its copy, and reads it.
-	if u := st.URL("https://inventoryapi.example.com/media/uploads/menu/x.jpg"); u != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
-		t.Errorf("legacy full url %q", u)
+	if !st.IsLegacy("https://inventoryapi.example.com/media/uploads/menu/x.jpg") || st.IsLegacy(key) {
+		t.Error("IsLegacy")
 	}
-	f.objects["pub/inventory/legacy/public/uploads/menu/x.jpg"] = []byte("x")
-	if b, _, err := st.Get(context.Background(), "https://inventoryapi.example.com/media/uploads/menu/x.jpg"); err != nil || string(b) != "x" {
-		t.Errorf("legacy full url get %q %v", b, err)
-	}
-	// A malformed key is an error, not a guess.
 	if _, _, err := st.Get(context.Background(), "inventory/t1/nope/x"); err == nil {
 		t.Error("malformed key must fail")
 	}
-
-	// Local mode: its own links normalise to keys or old paths.
-	root := t.TempDir()
-	loc, _ := New("inventory", Config{LocalRoot: root, LocalURLBase: "http://localhost:4002"}, WithLegacyBaseURL("http://localhost:4002"))
-	k2, _ := loc.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
-	if got := loc.Normalize(loc.URL(k2)); got != k2 {
-		t.Errorf("local link back to key: %q", got)
-	}
-	if got := loc.Normalize("http://localhost:4002/media/uploads/old.png"); got != "/media/uploads/old.png" {
-		t.Errorf("local legacy link: %q", got)
-	}
-	_ = os.MkdirAll(filepath.Join(root, "uploads"), 0o755)
-	_ = os.WriteFile(filepath.Join(root, "uploads", "old.png"), []byte("o"), 0o644)
-	if b, _, err := loc.Get(context.Background(), "http://localhost:4002/media/uploads/old.png"); err != nil || string(b) != "o" {
-		t.Errorf("local legacy full url get %q %v", b, err)
-	}
 }
 
-func TestRunLegacyCopy(t *testing.T) {
-	f, srv := newFakeS3(t)
+func TestRelink(t *testing.T) {
 	root := t.TempDir()
-	_ = os.WriteFile(filepath.Join(root, "a.png"), []byte("a"), 0o644)
-	t.Setenv("OBJECT_STORAGE_ENDPOINT", srv.URL)
-	t.Setenv("OBJECT_STORAGE_ACCESS_KEY_ID", "AK")
-	t.Setenv("OBJECT_STORAGE_SECRET_ACCESS_KEY", "SK")
-	t.Setenv("OBJECT_STORAGE_PUBLIC_BUCKET", "pub")
-	t.Setenv("OBJECT_STORAGE_PRIVATE_BUCKET", "priv")
-	t.Setenv("MEDIA_ROOT", root)
-	if err := RunLegacyCopy(context.Background(), "inventory"); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := f.objects["pub/inventory/legacy/public/a.png"]; !ok {
-		t.Fatal("not copied")
-	}
-	t.Setenv("MEDIA_ROOT", "")
-	if err := RunLegacyCopy(context.Background(), "inventory"); err == nil {
-		t.Error("no media root must be an error")
-	}
-}
+	st, f := remoteStore(t, root)
+	ctx := context.Background()
+	writeFile(t, root, "uploads/menu/logo.png", "png-bytes")
+	writeFile(t, root, "images/acme/items/a.jpg", "jpg-bytes")
+	acme := Owner{TenantID: "t1"}
 
-func TestCheck(t *testing.T) {
-	_, srv := newFakeS3(t)
-	ok, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "AK", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
-	// The fake answers a bucket HEAD with 404 until something is stored in it.
-	if err := ok.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "does not exist") {
-		t.Errorf("missing bucket must fail the check: %v", err)
+	rl := st.NewRelinker()
+	k1, changed, err := rl.Relink(ctx, "https://inventoryapi.example.com/media/uploads/menu/logo.png", acme, TypeLogos)
+	if err != nil || !changed || !strings.HasPrefix(k1, "inventory/t1/logos/") || !strings.HasSuffix(k1, ".png") {
+		t.Fatalf("relink %q %v %v", k1, changed, err)
 	}
-	denied, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "WRONG", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
-	if err := denied.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "denied") {
-		t.Errorf("bad credentials must fail the check: %v", err)
+	if string(f.objects["pub/"+k1]) != "png-bytes" {
+		t.Fatal("file not uploaded to its key")
 	}
-	none, _ := New("x", Config{})
-	if none.Check(context.Background()) != nil {
-		t.Error("an unconfigured store has nothing to check")
+	// The same file for the same owner (another row, a rerun) is not uploaded twice.
+	k2, _, _ := rl.Relink(ctx, "/media/uploads/menu/logo.png", acme, TypeLogos)
+	k3, _, _ := st.NewRelinker().Relink(ctx, "/media/uploads/menu/logo.png", acme, TypeLogos)
+	if k2 != k1 || k3 != k1 || f.puts != 1 {
+		t.Errorf("dedupe: %q %q puts=%d", k2, k3, f.puts)
+	}
+	// Another tenant gets its own copy.
+	if k4, _, _ := rl.Relink(ctx, "/media/uploads/menu/logo.png", Owner{TenantID: "t2"}, TypeLogos); !strings.HasPrefix(k4, "inventory/t2/logos/") {
+		t.Errorf("other owner key %q", k4)
+	}
+	// Already moved values, external URLs and empty values are left alone.
+	for _, ref := range []string{k1, "https://cdn.example.com/a.png", ""} {
+		if got, changed, err := rl.Relink(ctx, ref, acme, TypeLogos); got != ref || changed || err != nil {
+			t.Errorf("relink(%q) = %q %v %v", ref, got, changed, err)
+		}
+	}
+	if _, changed, err := rl.Relink(ctx, "/media/gone.png", acme, TypeLogos); changed || err != ErrNotFound || rl.Missing != 1 {
+		t.Errorf("missing file: %v %v %d", changed, err, rl.Missing)
+	}
+	if rl.Moved != 2 || rl.Reused != 1 {
+		t.Errorf("counts moved=%d reused=%d", rl.Moved, rl.Reused)
 	}
 }
 
@@ -281,88 +276,77 @@ func TestLocalMode(t *testing.T) {
 	if u := st.URL(k); !strings.HasPrefix(u, "http://localhost:4005/media/logistics/t1/kyc/a.pdf") || !strings.Contains(u, "sig=") {
 		t.Errorf("local private url must be signed: %q", u)
 	}
-	// An old file stays where it was and keeps its path.
-	_ = os.MkdirAll(filepath.Join(root, "uploads"), 0o755)
-	_ = os.WriteFile(filepath.Join(root, "uploads", "old.png"), []byte("o"), 0o644)
+	writeFile(t, root, "uploads/old.png", "o")
 	if b, _, err := st.Get(ctx, "/media/uploads/old.png"); err != nil || string(b) != "o" {
 		t.Errorf("legacy local get %q %v", b, err)
 	}
 	if u := st.URL("/media/uploads/old.png"); u != "http://localhost:4005/media/uploads/old.png" {
 		t.Errorf("legacy local url %q", u)
 	}
-	// The local handler serves public files freely, private ones only with a valid signature.
+
 	h := st.MediaHandler()
-	if h == nil {
-		t.Fatal("local mode must offer a handler")
-	}
-	serve := func(target string) int {
+	serve := func(h http.Handler, target string) *httptest.ResponseRecorder {
 		rec := httptest.NewRecorder()
 		http.StripPrefix("/media", h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
-		return rec.Code
+		return rec
 	}
-	signed := strings.TrimPrefix(st.URL(k), "http://localhost:4005")
-	if serve(signed) != http.StatusOK {
-		t.Errorf("signed private link must be served: %s", signed)
+	if serve(h, strings.TrimPrefix(st.URL(k), "http://localhost:4005")).Code != http.StatusOK {
+		t.Error("signed private link must be served")
 	}
-	if serve("/media/"+k) != http.StatusNotFound {
+	if serve(h, "/media/"+k).Code != http.StatusNotFound {
 		t.Error("unsigned private file must not be served")
 	}
 	pub, _ := st.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
 	_ = st.Put(ctx, pub, []byte("p"), "image/png")
-	if serve("/media/"+pub) != http.StatusOK {
+	if serve(h, "/media/"+pub).Code != http.StatusOK {
 		t.Error("public file must be served")
 	}
-	unsignedStore, _ := New("logistics", Config{LocalRoot: root})
-	rec := httptest.NewRecorder()
-	http.StripPrefix("/media", unsignedStore.MediaHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+k, nil))
-	if rec.Code != http.StatusNotFound {
+	unsigned, _ := New("logistics", Config{LocalRoot: root})
+	if serve(unsigned.MediaHandler(), "/media/"+k).Code != http.StatusNotFound {
 		t.Error("without a signer private files are never served")
 	}
-
-	// With object storage, public files (keys and old paths) redirect to R2, private ones 404.
-	remote, _ := remoteStore(t, WithLegacyPrivate(func(rel string) bool { return strings.HasPrefix(rel, "kyc/") }))
-	rh := remote.MediaHandler()
-	get := func(target string) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		http.StripPrefix("/media", rh).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
-		return rec
-	}
-	if rec := get("/media/uploads/menu/x.jpg"); rec.Code != http.StatusMovedPermanently ||
-		rec.Header().Get("Location") != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
-		t.Errorf("old public path must redirect: %d %q", rec.Code, rec.Header().Get("Location"))
-	}
-	rk, _ := remote.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
-	if rec := get("/media/" + rk); rec.Code != http.StatusMovedPermanently ||
-		rec.Header().Get("Location") != "https://media.example.com/"+rk {
-		t.Errorf("public key must redirect: %d %q", rec.Code, rec.Header().Get("Location"))
-	}
-	if get("/media/kyc/a.pdf").Code != http.StatusNotFound {
-		t.Error("an old private path must not redirect")
-	}
-	pk, _ := remote.Key(Owner{TenantID: "t1"}, TypeKYC, "a.pdf")
-	if get("/media/"+pk).Code != http.StatusNotFound {
-		t.Error("a private key must not redirect")
-	}
-	// A climbing path is cleaned first, so it can only point inside this service's public prefix.
-	if rec := get("/media/../../etc/passwd"); rec.Code == http.StatusMovedPermanently &&
-		!strings.HasPrefix(rec.Header().Get("Location"), "https://media.example.com/inventory/legacy/public/") {
-		t.Errorf("climbing path escaped: %q", rec.Header().Get("Location"))
-	}
-	if none, _ := New("x", Config{}); none.MediaHandler() != nil {
-		t.Error("nothing configured, nothing to serve")
-	}
-	// Values the store does not understand pass through URL unchanged.
-	if remote.URL("coffee") != "coffee" {
-		t.Error("an icon name must pass through")
-	}
-
 	if err := st.Delete(ctx, k); err != nil {
 		t.Fatal(err)
 	}
-
 	none, _ := New("x", Config{})
-	if none.Enabled() || none.Put(ctx, "x/t/kyc/a", nil, "") != ErrNotConfigured {
+	if none.Enabled() || none.MediaHandler() != nil || none.Put(ctx, "x/t/kyc/a", nil, "") != ErrNotConfigured {
 		t.Error("an unconfigured store must say so")
+	}
+}
+
+func TestRemoteMediaHandler(t *testing.T) {
+	root := t.TempDir()
+	st, _ := remoteStore(t, root, WithLegacyPrivate(func(rel string) bool { return strings.HasPrefix(rel, "kyc/") }))
+	writeFile(t, root, "uploads/menu/x.jpg", "old")
+	writeFile(t, root, "kyc/a.pdf", "secret")
+	h := st.MediaHandler()
+	get := func(target string) *httptest.ResponseRecorder {
+		rec := httptest.NewRecorder()
+		http.StripPrefix("/media", h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec
+	}
+	if rec := get("/media/uploads/menu/x.jpg"); rec.Code != http.StatusOK || rec.Body.String() != "old" {
+		t.Errorf("an old public file is still served from the volume: %d", rec.Code)
+	}
+	if get("/media/kyc/a.pdf").Code != http.StatusNotFound {
+		t.Error("an old private file needs a signed link")
+	}
+	rk, _ := st.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
+	if rec := get("/media/" + rk); rec.Code != http.StatusMovedPermanently || rec.Header().Get("Location") != "https://media.example.com/"+rk {
+		t.Errorf("a public key redirects to R2: %d %q", rec.Code, rec.Header().Get("Location"))
+	}
+	pk, _ := st.Key(Owner{TenantID: "t1"}, TypeKYC, "a.pdf")
+	if get("/media/"+pk).Code != http.StatusNotFound {
+		t.Error("a private key must not redirect")
+	}
+	if get("/media/../../etc/passwd").Code != http.StatusNotFound {
+		t.Error("a climbing path must not be served")
+	}
+	noVolume, _ := remoteStore(t, "")
+	rec := httptest.NewRecorder()
+	http.StripPrefix("/media", noVolume.MediaHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/uploads/menu/x.jpg", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Error("without a volume old paths are gone")
 	}
 }
 
@@ -397,27 +381,19 @@ func TestPrepare(t *testing.T) {
 	}
 }
 
-func TestCopyLegacyTree(t *testing.T) {
-	st, f := remoteStore(t)
-	root := t.TempDir()
-	_ = os.MkdirAll(filepath.Join(root, "images", "acme", "items"), 0o755)
-	_ = os.MkdirAll(filepath.Join(root, ".trash"), 0o755)
-	_ = os.WriteFile(filepath.Join(root, "images", "acme", "items", "a.png"), []byte("a"), 0o644)
-	_ = os.WriteFile(filepath.Join(root, ".trash", "b.png"), []byte("b"), 0o644)
-	_ = os.WriteFile(filepath.Join(root, "c.tmp"), []byte("c"), 0o644)
-
-	res, err := st.CopyLegacyTree(context.Background(), root)
-	if err != nil || res.Copied != 1 || res.Failed != 0 {
-		t.Fatalf("first run %+v %v", res, err)
+func TestCheck(t *testing.T) {
+	_, srv := newFakeS3(t)
+	ok, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "AK", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
+	// The fake answers a bucket HEAD with 404 until something is stored in it.
+	if err := ok.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("missing bucket must fail the check: %v", err)
 	}
-	if _, ok := f.objects["pub/inventory/legacy/public/images/acme/items/a.png"]; !ok {
-		t.Fatal("file not copied to its legacy key")
+	denied, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "WRONG", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
+	if err := denied.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Errorf("bad credentials must fail the check: %v", err)
 	}
-	if f.headers["pub/inventory/legacy/public/images/acme/items/a.png"].Get("Content-Type") != "image/png" {
-		t.Error("content type from the extension")
-	}
-	res, _ = st.CopyLegacyTree(context.Background(), root)
-	if res.Copied != 0 || res.Skipped != 1 {
-		t.Errorf("second run must skip: %+v", res)
+	none, _ := New("x", Config{})
+	if none.Check(context.Background()) != nil {
+		t.Error("an unconfigured store has nothing to check")
 	}
 }
