@@ -26,7 +26,7 @@ type Store struct {
 
 	signer        *httpware.MediaSigner
 	legacyPrivate func(rel string) bool
-	legacyKeys    bool
+	legacyBases   []string // origins whose "/media/..." URLs are legacy paths
 }
 
 // Option tunes a Store.
@@ -41,10 +41,19 @@ func WithLegacyPrivate(f func(rel string) bool) Option {
 	return func(st *Store) { st.legacyPrivate = f }
 }
 
-// WithLegacyKeys treats a stored value that is neither a key of this layout nor a "/media/" path
-// (for example an object key a service used before, "documents/<tenant>/bills/x.pdf") as a legacy
-// path, so it resolves to <service>/legacy/<public|private>/<value> once copied there.
-func WithLegacyKeys() Option { return func(st *Store) { st.legacyKeys = true } }
+// WithLegacyBaseURL names the origins a service used to put in front of its "/media/..." paths
+// (its old MEDIA_URL_BASE, e.g. https://inventoryapi.codevertexafrica.com), so a stored full URL
+// "<base>/media/<rel>" resolves like the relative legacy path "/media/<rel>". Empty values are
+// ignored.
+func WithLegacyBaseURL(bases ...string) Option {
+	return func(st *Store) {
+		for _, b := range bases {
+			if b = strings.TrimRight(strings.TrimSpace(b), "/"); b != "" {
+				st.legacyBases = append(st.legacyBases, strings.ToLower(b))
+			}
+		}
+	}
+}
 
 // New builds the store for service (the first key segment, e.g. "inventory"). With neither object
 // storage nor MEDIA_ROOT configured it returns a store whose operations fail with ErrNotConfigured.
@@ -220,7 +229,8 @@ func (s *Store) Exists(ctx context.Context, ref string) (bool, error) {
 
 // Delete removes ref; a missing file is not an error. Full http URLs (not ours) are ignored.
 func (s *Store) Delete(ctx context.Context, ref string) error {
-	if isExternal(ref) || strings.TrimSpace(ref) == "" {
+	ref = s.Normalize(ref)
+	if isExternal(ref) || ref == "" {
 		return nil
 	}
 	if !s.Enabled() {
@@ -257,7 +267,7 @@ func (s *Store) DownloadURL(ref, name string, ttl time.Duration) (string, error)
 }
 
 func (s *Store) link(ref, downloadName string, ttl time.Duration) (string, error) {
-	ref = strings.TrimSpace(ref)
+	ref = s.Normalize(ref)
 	if ref == "" || isExternal(ref) {
 		return ref, nil
 	}
@@ -309,7 +319,7 @@ func (s *Store) LegacyKey(rel string) (string, error) {
 // resolve maps a reference to its key and kind. Legacy paths, and keys of this or any service, are
 // accepted, so a service can read a file another one stored when handed its key.
 func (s *Store) resolve(ref string) (string, keyInfo, error) {
-	ref = strings.TrimSpace(ref)
+	ref = s.Normalize(ref)
 	if strings.HasPrefix(ref, LegacyPrefix) {
 		rel := strings.SplitN(strings.TrimPrefix(ref, LegacyPrefix), "?", 2)[0]
 		if dec, err := url.PathUnescape(rel); err == nil {
@@ -323,10 +333,71 @@ func (s *Store) resolve(ref string) (string, keyInfo, error) {
 		return key, info, err
 	}
 	info, err := parseKey(ref)
-	if err != nil && s.legacyKeys && !strings.HasPrefix(ref, s.service+"/") {
-		return s.resolve(LegacyPrefix + strings.TrimPrefix(ref, "/"))
-	}
 	return ref, info, err
+}
+
+// Normalize turns a value a client sends back into what should be stored: a public URL or a
+// presigned link of this store becomes its key, an old full media URL of this service
+// (WithLegacyBaseURL) becomes the relative "/media/..." path, and anything else (a key, a legacy
+// path, an external URL, "") is returned as it is. Use it before saving image or file fields.
+func (s *Store) Normalize(ref string) string {
+	ref = strings.TrimSpace(ref)
+	if s == nil || !isExternal(ref) || strings.HasPrefix(strings.ToLower(ref), "data:") {
+		return ref
+	}
+	u, err := url.Parse(ref)
+	if err != nil {
+		return ref
+	}
+	p, err := url.PathUnescape(u.EscapedPath())
+	if err != nil {
+		return ref
+	}
+	origin := strings.ToLower(u.Scheme + "://" + u.Host)
+	if s.cfg.PublicBaseURL != "" && strings.EqualFold(origin, s.originOf(s.cfg.PublicBaseURL)) {
+		if key := strings.TrimPrefix(p, "/"); key != "" {
+			if _, err := parseKey(key); err == nil {
+				return key
+			}
+		}
+	}
+	if s.s3 != nil && strings.EqualFold(origin, strings.ToLower(s.s3.endpoint.Scheme+"://"+s.s3.endpoint.Host)) {
+		for _, b := range []string{s.cfg.PublicBucket, s.cfg.PrivateBucket} {
+			if key := strings.TrimPrefix(p, "/"+b+"/"); key != p {
+				if _, err := parseKey(key); err == nil {
+					return key
+				}
+			}
+		}
+	}
+	local := strings.ToLower(s.cfg.LocalURLBase)
+	for _, b := range append([]string{local}, s.legacyBases...) {
+		if b == "" || origin != s.originOf(b) {
+			continue
+		}
+		basePath := strings.TrimSuffix(strings.TrimPrefix(b, s.originOf(b)), "/")
+		rest := strings.TrimPrefix(p, basePath)
+		if strings.HasPrefix(rest, LegacyPrefix) {
+			if b == local {
+				// A local link of this store: a key, or an old relative path.
+				if key := strings.TrimPrefix(rest, LegacyPrefix); key != "" {
+					if _, err := parseKey(key); err == nil {
+						return key
+					}
+				}
+			}
+			return rest
+		}
+	}
+	return ref
+}
+
+func (s *Store) originOf(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host)
 }
 
 func (s *Store) bucket(info keyInfo) string {
@@ -351,8 +422,8 @@ func (s *Store) localPath(key string) (string, error) {
 
 // localPathRef is the local file of ref: a legacy path stays where it always was.
 func (s *Store) localPathRef(ref, key string) (string, error) {
-	if strings.HasPrefix(strings.TrimSpace(ref), LegacyPrefix) {
-		rel := strings.SplitN(strings.TrimPrefix(strings.TrimSpace(ref), LegacyPrefix), "?", 2)[0]
+	if ref = s.Normalize(ref); strings.HasPrefix(ref, LegacyPrefix) {
+		rel := strings.SplitN(strings.TrimPrefix(ref, LegacyPrefix), "?", 2)[0]
 		return s.localPath(rel)
 	}
 	return s.localPath(key)

@@ -160,23 +160,55 @@ func TestRemotePutURLGetDelete(t *testing.T) {
 	}
 }
 
-func TestLegacyKeys(t *testing.T) {
-	st, f := remoteStore(t, WithLegacyKeys(), WithLegacyPrivate(func(string) bool { return true }))
-	f.objects["priv/inventory/legacy/private/documents/t1/bills/b1/a.pdf"] = []byte("old")
-	b, _, err := st.Get(context.Background(), "documents/t1/bills/b1/a.pdf")
-	if err != nil || string(b) != "old" {
-		t.Fatalf("old key must read its copy: %q %v", b, err)
+func TestNormalizeAndLegacyBaseURL(t *testing.T) {
+	st, f := remoteStore(t, WithLegacyBaseURL("https://inventoryapi.example.com/", ""))
+	key, _ := st.Key(Owner{TenantID: "t1"}, TypeItemImages, "2026/10/a.jpg")
+	priv, _ := st.Key(Owner{TenantID: "t1"}, TypeKYC, "id.pdf")
+	cases := map[string]string{
+		"https://media.example.com/" + key: key, // public URL back to its key
+		st.URL(priv):                       priv,
+		"https://inventoryapi.example.com/media/uploads/menu/x.jpg":     "/media/uploads/menu/x.jpg",
+		"https://INVENTORYAPI.example.com/media/uploads/menu/x.jpg?v=1": "/media/uploads/menu/x.jpg",
+		"https://inventoryapi.example.com/api/v1/other":                 "https://inventoryapi.example.com/api/v1/other",
+		"https://cdn.example.com/a.png":                                 "https://cdn.example.com/a.png",
+		"https://media.example.com/not/a/valid":                         "https://media.example.com/not/a/valid",
+		"/media/uploads/menu/x.jpg":                                     "/media/uploads/menu/x.jpg",
+		key:                                                             key,
+		"":                                                              "",
+		"data:image/png;base64,AAAA":                                    "data:image/png;base64,AAAA",
 	}
-	if u := st.URL("documents/t1/bills/b1/a.pdf"); !strings.Contains(u, "/priv/inventory/legacy/private/documents/t1/bills/b1/a.pdf?") {
-		t.Errorf("old key url %q", u)
+	for in, want := range cases {
+		if got := st.Normalize(in); got != want {
+			t.Errorf("Normalize(%q) = %q, want %q", in, got, want)
+		}
 	}
-	// A malformed key of this service is an error, not a legacy path.
+	// An old full URL resolves to its copy, and reads it.
+	if u := st.URL("https://inventoryapi.example.com/media/uploads/menu/x.jpg"); u != "https://media.example.com/inventory/legacy/public/uploads/menu/x.jpg" {
+		t.Errorf("legacy full url %q", u)
+	}
+	f.objects["pub/inventory/legacy/public/uploads/menu/x.jpg"] = []byte("x")
+	if b, _, err := st.Get(context.Background(), "https://inventoryapi.example.com/media/uploads/menu/x.jpg"); err != nil || string(b) != "x" {
+		t.Errorf("legacy full url get %q %v", b, err)
+	}
+	// A malformed key is an error, not a guess.
 	if _, _, err := st.Get(context.Background(), "inventory/t1/nope/x"); err == nil {
-		t.Error("malformed own key must fail")
+		t.Error("malformed key must fail")
 	}
-	plain, _ := remoteStore(t)
-	if _, _, err := plain.Get(context.Background(), "documents/t1/bills/b1/a.pdf"); err == nil {
-		t.Error("without WithLegacyKeys an old key is invalid")
+
+	// Local mode: its own links normalise to keys or old paths.
+	root := t.TempDir()
+	loc, _ := New("inventory", Config{LocalRoot: root, LocalURLBase: "http://localhost:4002"}, WithLegacyBaseURL("http://localhost:4002"))
+	k2, _ := loc.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
+	if got := loc.Normalize(loc.URL(k2)); got != k2 {
+		t.Errorf("local link back to key: %q", got)
+	}
+	if got := loc.Normalize("http://localhost:4002/media/uploads/old.png"); got != "/media/uploads/old.png" {
+		t.Errorf("local legacy link: %q", got)
+	}
+	_ = os.MkdirAll(filepath.Join(root, "uploads"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "uploads", "old.png"), []byte("o"), 0o644)
+	if b, _, err := loc.Get(context.Background(), "http://localhost:4002/media/uploads/old.png"); err != nil || string(b) != "o" {
+		t.Errorf("local legacy full url get %q %v", b, err)
 	}
 }
 
