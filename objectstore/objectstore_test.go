@@ -160,6 +160,43 @@ func TestRemotePutURLGetDelete(t *testing.T) {
 	}
 }
 
+func TestLegacyKeys(t *testing.T) {
+	st, f := remoteStore(t, WithLegacyKeys(), WithLegacyPrivate(func(string) bool { return true }))
+	f.objects["priv/inventory/legacy/private/documents/t1/bills/b1/a.pdf"] = []byte("old")
+	b, _, err := st.Get(context.Background(), "documents/t1/bills/b1/a.pdf")
+	if err != nil || string(b) != "old" {
+		t.Fatalf("old key must read its copy: %q %v", b, err)
+	}
+	if u := st.URL("documents/t1/bills/b1/a.pdf"); !strings.Contains(u, "/priv/inventory/legacy/private/documents/t1/bills/b1/a.pdf?") {
+		t.Errorf("old key url %q", u)
+	}
+	// A malformed key of this service is an error, not a legacy path.
+	if _, _, err := st.Get(context.Background(), "inventory/t1/nope/x"); err == nil {
+		t.Error("malformed own key must fail")
+	}
+	plain, _ := remoteStore(t)
+	if _, _, err := plain.Get(context.Background(), "documents/t1/bills/b1/a.pdf"); err == nil {
+		t.Error("without WithLegacyKeys an old key is invalid")
+	}
+}
+
+func TestCheck(t *testing.T) {
+	_, srv := newFakeS3(t)
+	ok, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "AK", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
+	// The fake answers a bucket HEAD with 404 until something is stored in it.
+	if err := ok.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "does not exist") {
+		t.Errorf("missing bucket must fail the check: %v", err)
+	}
+	denied, _ := New("x", Config{Endpoint: srv.URL, AccessKeyID: "WRONG", SecretAccessKey: "SK", PublicBucket: "p", PrivateBucket: "q"})
+	if err := denied.Check(context.Background()); err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Errorf("bad credentials must fail the check: %v", err)
+	}
+	none, _ := New("x", Config{})
+	if none.Check(context.Background()) != nil {
+		t.Error("an unconfigured store has nothing to check")
+	}
+}
+
 func TestLocalMode(t *testing.T) {
 	root := t.TempDir()
 	signer := httpware.NewMediaSigner("secret", time.Hour)

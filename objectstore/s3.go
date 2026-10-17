@@ -189,6 +189,29 @@ func (c *s3Client) presignGet(bucket, key, downloadName string, ttl time.Duratio
 	return c.endpoint.Scheme + "://" + host + canonicalURI + "?" + canonicalQuery + "&X-Amz-Signature=" + signature
 }
 
+// headBucket checks the bucket is reachable with these credentials.
+func (c *s3Client) headBucket(ctx context.Context, bucket string) error {
+	req, err := c.newRequest(ctx, http.MethodHead, bucket, "", nil, nil)
+	if err != nil {
+		return err
+	}
+	c.sign(req, nil)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("objectstore: bucket %s unreachable: %w", bucket, err)
+	}
+	drain(resp)
+	switch {
+	case resp.StatusCode < 300:
+		return nil
+	case resp.StatusCode == http.StatusNotFound:
+		return fmt.Errorf("objectstore: bucket %s does not exist", bucket)
+	case resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized:
+		return fmt.Errorf("objectstore: access to bucket %s denied (%s)", bucket, resp.Status)
+	}
+	return fmt.Errorf("objectstore: bucket %s: %s", bucket, resp.Status)
+}
+
 // ensureBucket creates a missing bucket once per process when AutoCreateBuckets is on (local
 // MinIO). Production buckets are created by infrastructure, and the R2 token cannot create them.
 func (c *s3Client) ensureBucket(ctx context.Context, bucket string) error {

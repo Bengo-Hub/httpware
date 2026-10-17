@@ -196,6 +196,9 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 - Old local paths `/media/<rel>` keep working: they resolve to `<service>/legacy/<public|private>/<rel>`
   (`WithLegacyPrivate` names the private ones), where `CopyLegacyTree` copies a service's old media
   directory once. It is idempotent, so a stopped copy is simply run again.
+- `WithLegacyKeys` (v0.8.1) does the same for object keys a service used before this layout
+  (e.g. `documents/<tenant>/bills/x.pdf`), so stored rows need no rewrite.
+- `Check(ctx)` (v0.8.1) is a readiness probe: both buckets reachable with the credentials.
 - In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`
   (serve it with `StaticMedia`; `WithLocalSigner` signs private links).
 

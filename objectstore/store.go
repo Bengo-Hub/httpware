@@ -24,6 +24,7 @@ type Store struct {
 
 	signer        *httpware.MediaSigner
 	legacyPrivate func(rel string) bool
+	legacyKeys    bool
 }
 
 // Option tunes a Store.
@@ -37,6 +38,11 @@ func WithLocalSigner(s *httpware.MediaSigner) Option { return func(st *Store) { 
 func WithLegacyPrivate(f func(rel string) bool) Option {
 	return func(st *Store) { st.legacyPrivate = f }
 }
+
+// WithLegacyKeys treats a stored value that is neither a key of this layout nor a "/media/" path
+// (for example an object key a service used before, "documents/<tenant>/bills/x.pdf") as a legacy
+// path, so it resolves to <service>/legacy/<public|private>/<value> once copied there.
+func WithLegacyKeys() Option { return func(st *Store) { st.legacyKeys = true } }
 
 // New builds the store for service (the first key segment, e.g. "inventory"). With neither object
 // storage nor MEDIA_ROOT configured it returns a store whose operations fail with ErrNotConfigured.
@@ -68,6 +74,26 @@ func (s *Store) Remote() bool { return s != nil && s.s3 != nil }
 
 // Enabled reports whether the store can save files at all.
 func (s *Store) Enabled() bool { return s != nil && (s.s3 != nil || s.cfg.LocalRoot != "") }
+
+// Check is a readiness probe: both buckets reachable with the configured credentials (remote), or
+// the media root writable (local). An unconfigured store reports nil, as there is nothing to
+// reach.
+func (s *Store) Check(ctx context.Context) error {
+	switch {
+	case s == nil || !s.Enabled():
+		return nil
+	case s.s3 != nil:
+		if err := s.s3.headBucket(ctx, s.cfg.PrivateBucket); err != nil {
+			return err
+		}
+		return s.s3.headBucket(ctx, s.cfg.PublicBucket)
+	default:
+		if err := os.MkdirAll(s.cfg.LocalRoot, 0o755); err != nil {
+			return fmt.Errorf("objectstore: media root: %w", err)
+		}
+		return nil
+	}
+}
 
 // Key builds the key of a named object, for callers that choose the name (a content hash, a record
 // id), e.g. Key(Owner{TenantID: t}, TypeDocuments, "invoices", id, hash+".pdf").
@@ -263,6 +289,9 @@ func (s *Store) resolve(ref string) (string, keyInfo, error) {
 		return key, info, err
 	}
 	info, err := parseKey(ref)
+	if err != nil && s.legacyKeys && !strings.HasPrefix(ref, s.service+"/") {
+		return s.resolve(LegacyPrefix + strings.TrimPrefix(ref, "/"))
+	}
 	return ref, info, err
 }
 
