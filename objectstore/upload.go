@@ -140,6 +140,8 @@ func extFor(ct string) string {
 		return ".epub"
 	case "application/zip":
 		return ".zip"
+	case "audio/mpeg":
+		return ".mp3"
 	case "text/csv":
 		return ".csv"
 	case "application/json":

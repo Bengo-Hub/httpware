@@ -118,26 +118,44 @@ func (c *s3Client) get(ctx context.Context, bucket, key string) ([]byte, string,
 
 // open starts a streaming GET; the caller closes the body. size is -1 when unknown.
 func (c *s3Client) open(ctx context.Context, bucket, key string) (io.ReadCloser, int64, string, error) {
-	req, err := c.newRequest(ctx, http.MethodGet, bucket, key, nil, nil)
+	resp, err := c.fetch(ctx, bucket, key, "")
 	if err != nil {
 		return nil, 0, "", err
 	}
+	return resp.Body, resp.ContentLength, resp.Header.Get("Content-Type"), nil
+}
+
+// fetch starts a streaming GET, forwarding an optional Range header ("bytes=0-1023"). The caller
+// closes the body of a 200 or 206 answer; a 416 comes back as is (body drained) so the caller
+// can pass it on.
+func (c *s3Client) fetch(ctx context.Context, bucket, key, rng string) (*http.Response, error) {
+	req, err := c.newRequest(ctx, http.MethodGet, bucket, key, nil, nil)
+	if err != nil {
+		return nil, err
+	}
 	c.sign(req, nil)
+	// Range is not part of the signature, so it is set after signing.
+	if rng != "" {
+		req.Header.Set("Range", rng)
+	}
 	// No client timeout here: a large file may take longer than the request timeout to stream;
 	// the caller's context bounds it.
 	resp, err := (&http.Client{Transport: c.http.Transport}).Do(req)
 	if err != nil {
-		return nil, 0, "", fmt.Errorf("objectstore get %s: %w", key, err)
+		return nil, fmt.Errorf("objectstore get %s: %w", key, err)
 	}
-	if resp.StatusCode == http.StatusNotFound {
+	switch {
+	case resp.StatusCode == http.StatusNotFound:
 		drain(resp)
-		return nil, 0, "", ErrNotFound
-	}
-	if resp.StatusCode >= 300 {
+		return nil, ErrNotFound
+	case resp.StatusCode == http.StatusRequestedRangeNotSatisfiable:
+		drain(resp)
+		return resp, nil
+	case resp.StatusCode >= 300:
 		defer drain(resp)
-		return nil, 0, "", fmt.Errorf("objectstore get %s: %s", key, statusDetail(resp))
+		return nil, fmt.Errorf("objectstore get %s: %s", key, statusDetail(resp))
 	}
-	return resp.Body, resp.ContentLength, resp.Header.Get("Content-Type"), nil
+	return resp, nil
 }
 
 func (c *s3Client) exists(ctx context.Context, bucket, key string) (bool, error) {

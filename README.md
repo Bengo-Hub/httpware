@@ -202,7 +202,12 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
   old volume files and external URLs may be shared and are left alone.
 - `Check(ctx)` is a readiness probe: both buckets reachable with the credentials.
 - `Open(ctx, ref)` (v0.12.0) streams a stored file (reader, size, content type) without holding it
-  in memory; use it to serve large private files (e-books, documents) through the API.
+  in memory.
+- `Serve(w, r, ref, contentType)` (v0.13.0) writes a stored file to the response with range
+  support, so in-browser PDF, EPUB and audio readers can seek: the reader's Range header goes to
+  the bucket and a 206 comes back as is; local files use `http.ServeContent`. It returns
+  `ErrNotFound` before writing anything. Use it to serve private files (e-books, documents)
+  through the API after the access check.
 - Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files
   in local mode, and old `/media/<rel>` paths not yet relinked; private ones, named by
   `WithLegacyPrivate`, only with a link signed by `WithLocalSigner`). With object storage a public

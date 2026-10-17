@@ -51,9 +51,8 @@ func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
 				return
 			}
 			w.Header().Set("Content-Type", f.headers[p].Get("Content-Type"))
-			if r.Method == http.MethodGet {
-				_, _ = w.Write(b)
-			}
+			// Answers Range requests (206 and 416) the way S3 and R2 do.
+			http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(b))
 		case http.MethodDelete:
 			delete(f.objects, p)
 			w.WriteHeader(http.StatusNoContent)
@@ -408,5 +407,61 @@ func TestCheck(t *testing.T) {
 	none, _ := New("x", Config{})
 	if none.Check(context.Background()) != nil {
 		t.Error("an unconfigured store has nothing to check")
+	}
+}
+
+func TestServeRanges(t *testing.T) {
+	ctx := context.Background()
+	body := "0123456789abcdef"
+	serve := func(st *Store, ref, rng string) (*httptest.ResponseRecorder, error) {
+		req := httptest.NewRequest(http.MethodGet, "/read", nil)
+		if rng != "" {
+			req.Header.Set("Range", rng)
+		}
+		rec := httptest.NewRecorder()
+		return rec, st.Serve(rec, req, ref, "application/pdf")
+	}
+
+	remote, _ := remoteStore(t, "")
+	k, _ := remote.Key(Owner{TenantID: "t1"}, TypeKYC, "book.pdf")
+	if err := remote.Put(ctx, k, []byte(body), "application/pdf"); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := serve(remote, k, "")
+	if err != nil || rec.Code != http.StatusOK || rec.Body.String() != body || rec.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("full read: %d %q %v", rec.Code, rec.Body.String(), err)
+	}
+	rec, err = serve(remote, k, "bytes=4-7")
+	if err != nil || rec.Code != http.StatusPartialContent || rec.Body.String() != "4567" || rec.Header().Get("Content-Range") != "bytes 4-7/16" {
+		t.Fatalf("range read: %d %q %q %v", rec.Code, rec.Body.String(), rec.Header().Get("Content-Range"), err)
+	}
+	if rec.Header().Get("Content-Type") != "application/pdf" {
+		t.Errorf("content type %q", rec.Header().Get("Content-Type"))
+	}
+	rec, err = serve(remote, k, "bytes=100-200")
+	if err != nil || rec.Code != http.StatusRequestedRangeNotSatisfiable {
+		t.Fatalf("range past the end: %d %v", rec.Code, err)
+	}
+	missing, _ := remote.Key(Owner{TenantID: "t1"}, TypeKYC, "none.pdf")
+	rec, err = serve(remote, missing, "")
+	if err != ErrNotFound || rec.Body.Len() != 0 {
+		t.Fatalf("missing file must return ErrNotFound before writing: %v %d", err, rec.Body.Len())
+	}
+
+	root := t.TempDir()
+	local, err := New("library", Config{LocalRoot: root, LocalURLBase: "http://localhost:4000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lk, _ := local.Key(Owner{TenantID: "t1"}, TypeKYC, "book.pdf")
+	if err := local.Put(ctx, lk, []byte(body), "application/pdf"); err != nil {
+		t.Fatal(err)
+	}
+	rec, err = serve(local, lk, "bytes=10-")
+	if err != nil || rec.Code != http.StatusPartialContent || rec.Body.String() != "abcdef" || rec.Header().Get("Content-Type") != "application/pdf" {
+		t.Fatalf("local range read: %d %q %v", rec.Code, rec.Body.String(), err)
+	}
+	if _, err := serve(local, "library/t1/kyc/none.pdf", ""); err != ErrNotFound {
+		t.Fatalf("local missing: %v", err)
 	}
 }

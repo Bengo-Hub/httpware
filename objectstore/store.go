@@ -247,6 +247,71 @@ func (s *Store) Open(ctx context.Context, ref string) (io.ReadCloser, int64, str
 	return f, size, "", nil
 }
 
+// Serve writes a stored file to the response with range support, so PDF, EPUB and audio readers
+// can seek. A remote file streams from the bucket with the client's Range header passed on; a
+// local file goes through http.ServeContent. contentType is used when the store reports none.
+// ErrNotFound is returned before anything is written, so the caller can answer 404; an error
+// after the headers went out (a client that hung up) is returned for logging only.
+func (s *Store) Serve(w http.ResponseWriter, r *http.Request, ref, contentType string) error {
+	if !s.Enabled() {
+		return ErrNotConfigured
+	}
+	res, err := s.resolve(ref)
+	if err != nil {
+		return err
+	}
+	if !res.remote() {
+		f, err := os.Open(res.file)
+		if errors.Is(err, os.ErrNotExist) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		st, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if contentType != "" {
+			w.Header().Set("Content-Type", contentType)
+		}
+		http.ServeContent(w, r, path.Base(res.file), st.ModTime(), f)
+		return nil
+	}
+	resp, err := s.s3.fetch(r.Context(), s.bucket(res.info), res.key, r.Header.Get("Range"))
+	if err != nil {
+		return err
+	}
+	h := w.Header()
+	if resp.StatusCode == http.StatusRequestedRangeNotSatisfiable {
+		if cr := resp.Header.Get("Content-Range"); cr != "" {
+			h.Set("Content-Range", cr)
+		}
+		w.WriteHeader(http.StatusRequestedRangeNotSatisfiable)
+		return nil
+	}
+	defer resp.Body.Close()
+	if ct := resp.Header.Get("Content-Type"); ct != "" && ct != "application/octet-stream" {
+		contentType = ct
+	}
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	}
+	for _, name := range []string{"Content-Length", "Content-Range", "ETag", "Last-Modified"} {
+		if v := resp.Header.Get(name); v != "" {
+			h.Set(name, v)
+		}
+	}
+	h.Set("Accept-Ranges", "bytes")
+	w.WriteHeader(resp.StatusCode)
+	if r.Method == http.MethodHead {
+		return nil
+	}
+	_, err = io.Copy(w, resp.Body)
+	return err
+}
+
 // Exists reports whether ref is stored.
 func (s *Store) Exists(ctx context.Context, ref string) (bool, error) {
 	if !s.Enabled() {
