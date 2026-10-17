@@ -227,6 +227,38 @@ func TestLocalMode(t *testing.T) {
 	if u := st.URL("/media/uploads/old.png"); u != "http://localhost:4005/media/uploads/old.png" {
 		t.Errorf("legacy local url %q", u)
 	}
+	// The local handler serves public files freely, private ones only with a valid signature.
+	h := st.LocalHandler()
+	if h == nil {
+		t.Fatal("local mode must offer a handler")
+	}
+	serve := func(target string) int {
+		rec := httptest.NewRecorder()
+		http.StripPrefix("/media", h).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		return rec.Code
+	}
+	signed := strings.TrimPrefix(st.URL(k), "http://localhost:4005")
+	if serve(signed) != http.StatusOK {
+		t.Errorf("signed private link must be served: %s", signed)
+	}
+	if serve("/media/"+k) != http.StatusNotFound {
+		t.Error("unsigned private file must not be served")
+	}
+	pub, _ := st.Key(Owner{TenantID: "t1"}, TypeLogos, "l.png")
+	_ = st.Put(ctx, pub, []byte("p"), "image/png")
+	if serve("/media/"+pub) != http.StatusOK {
+		t.Error("public file must be served")
+	}
+	unsignedStore, _ := New("logistics", Config{LocalRoot: root})
+	rec := httptest.NewRecorder()
+	http.StripPrefix("/media", unsignedStore.LocalHandler()).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/media/"+k, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Error("without a signer private files are never served")
+	}
+	if remote, _ := remoteStore(t); remote.LocalHandler() != nil {
+		t.Error("remote stores serve nothing locally")
+	}
+
 	if err := st.Delete(ctx, k); err != nil {
 		t.Fatal(err)
 	}

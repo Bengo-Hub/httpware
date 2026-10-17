@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -93,6 +95,38 @@ func (s *Store) Check(ctx context.Context) error {
 		}
 		return nil
 	}
+}
+
+// LocalHandler serves the local media root in local mode, to be mounted at /media:
+//
+//	if h := store.LocalHandler(); h != nil {
+//		r.Handle("/media/*", http.StripPrefix("/media", h))
+//	}
+//
+// Private files need a signed link (WithLocalSigner; without a signer they are not served at all).
+// It returns nil with object storage configured, where files are served by R2.
+func (s *Store) LocalHandler() http.Handler {
+	if s == nil || s.s3 != nil || s.cfg.LocalRoot == "" {
+		return nil
+	}
+	private := func(name string) bool {
+		key := strings.TrimPrefix(path.Clean("/"+name), "/")
+		if info, err := parseKey(key); err == nil {
+			return !info.public
+		}
+		return s.legacyPrivate(key)
+	}
+	h := httpware.StaticMedia(s.cfg.LocalRoot, httpware.MediaOptions{Private: private, Signer: s.signer})
+	if s.signer != nil {
+		return h
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if private(r.URL.Path) {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // Key builds the key of a named object, for callers that choose the name (a content hash, a record

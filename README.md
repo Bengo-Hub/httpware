@@ -199,8 +199,9 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 - `WithLegacyKeys` (v0.8.1) does the same for object keys a service used before this layout
   (e.g. `documents/<tenant>/bills/x.pdf`), so stored rows need no rewrite.
 - `Check(ctx)` (v0.8.1) is a readiness probe: both buckets reachable with the credentials.
-- In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`
-  (serve it with `StaticMedia`; `WithLocalSigner` signs private links).
+- In local mode files live under `MEDIA_ROOT/<key>` and links are `MEDIA_URL_BASE/media/<key>`.
+  Mount `store.LocalHandler()` (v0.8.2, nil with object storage) at `/media`; private files need
+  a link signed by `WithLocalSigner` and are never served without one.
 
 ## Middleware Details
 
