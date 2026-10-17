@@ -219,6 +219,26 @@ Each referenced file is uploaded under its owner with a content hash name, so on
 rows is stored once and a rerun uploads nothing twice. Files no row references are never moved and
 go away with the volume, which is released once every row is relinked.
 
+### Money rounding: `money` (v0.11.0)
+
+The single place services round amounts, so ledgers, balance sheets, tax submissions and FX
+conversions agree to the cent. Do not write a private `round2` in a service.
+
+```go
+import "github.com/Bengo-Hub/httpware/money"
+
+money.Round2(74.24000000000001)         // 74.24
+money.Round(v, money.Places("UGX"))     // currency aware, UGX/RWF/JPY have 0 places
+money.Convert(100, rate, "UGX")         // converts and rounds at the target currency places
+money.Fields2(&tax, &total)             // round fields in place before sending to a regulator
+money.Sum(2, a, b, c)                   // total rounded once
+money.Split(100, 2, 3)                  // [33.34 33.33 33.33], parts add back to the total
+money.Split(discount, 2, n, weights...) // prorate a discount without losing a cent
+```
+
+Rounding is half away from zero and strips float noise (1.005 gives 1.01, negatives mirror).
+The currency table mirrors `CURRENCY_META` in shared-ui-lib; keep the two in step.
+
 ## Middleware Details
 
 ### RequestID
