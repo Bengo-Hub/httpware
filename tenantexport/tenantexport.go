@@ -18,6 +18,7 @@ package tenantexport
 import (
 	"compress/gzip"
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,9 @@ type Options struct {
 	ExcludeTables []string
 	// SecretColumns overrides the column-name pattern of values that are never exported.
 	SecretColumns *regexp.Regexp
+	// InternalKey, when set, makes Handler check the X-API-Key header itself (constant time), for
+	// services that have no S2S route group with their own key middleware.
+	InternalKey string
 }
 
 // DefaultSecretColumns matches column names whose values must never leave the service.
@@ -199,9 +203,14 @@ func pgTextArray(items []string) string {
 }
 
 // Handler serves GET exports for service-to-service callers (auth-api). Mount it behind the
-// service's API-key middleware; the tenant comes from the X-Tenant-ID header.
+// service's API-key middleware, or set Options.InternalKey; the tenant comes from the
+// X-Tenant-ID header.
 func Handler(db *sql.DB, opt Options) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if opt.InternalKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-API-Key")), []byte(opt.InternalKey)) != 1 {
+			http.Error(w, `{"error":"invalid or missing service key"}`, http.StatusUnauthorized)
+			return
+		}
 		tenantID, err := uuid.Parse(r.Header.Get("X-Tenant-ID"))
 		if err != nil {
 			http.Error(w, `{"error":"X-Tenant-ID must be a tenant uuid"}`, http.StatusBadRequest)

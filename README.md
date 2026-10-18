@@ -221,7 +221,7 @@ password, secret, token, api key, credential, private key, pin, otp, encrypted) 
 infrastructure tables (outbox, processed events, backups, `*_bk_*` copies) are never exported.
 
 `tenantexport.Handler(db, opts)` serves it for auth-api's tenant backups (v0.14.1: `IsStreaming` also matches `Accept: application/x-ndjson`, which auth-api sends, so routers that wrap Timeout and Compress in `BypassForStreaming` skip both). Mount it as
-`GET /api/v1/s2s/tenant-export` behind the service's API-key middleware and outside any
+`GET /api/v1/s2s/tenant-export` behind the service's API-key middleware (or set `Options.InternalKey`, v0.14.2, to have the handler check `X-API-Key` itself) and outside any
 request-timeout middleware; the tenant comes from `X-Tenant-ID`. A stream without its summary
 line is incomplete.
 - Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files

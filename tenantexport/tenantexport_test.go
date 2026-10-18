@@ -120,6 +120,23 @@ func TestExportOnPostgres(t *testing.T) {
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing tenant must be refused: %d", rec.Code)
 	}
+
+	// With InternalKey the handler checks the key itself.
+	keyed := Handler(db, Options{Service: "svc", InternalKey: "SECRET"})
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/export", nil)
+	req.Header.Set("X-Tenant-ID", a.String())
+	req.Header.Set("X-API-Key", "WRONG")
+	keyed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong key must be refused: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req.Header.Set("X-API-Key", "SECRET")
+	keyed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("right key must pass: %d", rec.Code)
+	}
 }
 
 func readLines(t *testing.T, gzBytes []byte) []map[string]any {
