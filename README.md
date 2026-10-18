@@ -208,6 +208,22 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
   the bucket and a 206 comes back as is; local files use `http.ServeContent`. It returns
   `ErrNotFound` before writing anything. Use it to serve private files (e-books, documents)
   through the API after the access check.
+- `PutStream(ctx, key, r, size, contentType)` (v0.14.0) uploads without holding the file in
+  memory (backup archives, large exports): one PUT signed with `UNSIGNED-PAYLOAD`.
+
+### Tenant exports (`tenantexport`, v0.14.0)
+
+`tenantexport.Write(ctx, db, tenantID, w, opts)` streams one tenant's rows of the service's
+database (every table of `current_schema()` with a `tenant_id` column) as gzipped JSON Lines:
+an `export` line, one `row` line per row, then a `summary` line with counts. Rows are read one at a
+time, so memory stays flat. Columns whose names look like secrets (`DefaultSecretColumns`:
+password, secret, token, api key, credential, private key, pin, otp, encrypted) and the
+infrastructure tables (outbox, processed events, backups, `*_bk_*` copies) are never exported.
+
+`tenantexport.Handler(db, opts)` serves it for auth-api's tenant backups: mount it as
+`GET /api/v1/s2s/tenant-export` behind the service's API-key middleware and outside any
+request-timeout middleware; the tenant comes from `X-Tenant-ID`. A stream without its summary
+line is incomplete.
 - Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files
   in local mode, and old `/media/<rel>` paths not yet relinked; private ones, named by
   `WithLegacyPrivate`, only with a link signed by `WithLocalSigner`). With object storage a public

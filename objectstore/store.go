@@ -200,6 +200,47 @@ func (s *Store) Put(ctx context.Context, key string, data []byte, contentType st
 	return os.Rename(tmp, p)
 }
 
+// PutStream stores size bytes read from r at key without holding them in memory (backup
+// archives, large exports). Otherwise the same as Put.
+func (s *Store) PutStream(ctx context.Context, key string, r io.Reader, size int64, contentType string) error {
+	if !s.Enabled() {
+		return ErrNotConfigured
+	}
+	info, err := parseKey(key)
+	if err != nil {
+		return err
+	}
+	if s.s3 != nil {
+		cc := "private, no-store"
+		if info.public {
+			cc = "public, max-age=31536000, immutable"
+		}
+		return s.s3.putStream(ctx, s.bucket(info), key, r, size, contentType, cc)
+	}
+	p, err := s.localPath(key)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return fmt.Errorf("objectstore: %w", err)
+	}
+	tmp := p + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("objectstore: %w", err)
+	}
+	if _, err := io.Copy(f, io.LimitReader(r, size)); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("objectstore: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("objectstore: %w", err)
+	}
+	return os.Rename(tmp, p)
+}
+
 // Get returns the stored bytes and content type of a key, or of a legacy path (read from the
 // media volume). Local files report no content type.
 func (s *Store) Get(ctx context.Context, ref string) ([]byte, string, error) {

@@ -92,6 +92,38 @@ func (c *s3Client) put(ctx context.Context, bucket, key string, body []byte, con
 	return nil
 }
 
+// putStream uploads size bytes read from body without holding them in memory (a single PUT,
+// up to 5 GB).
+func (c *s3Client) putStream(ctx context.Context, bucket, key string, body io.Reader, size int64, contentType, cacheControl string) error {
+	if err := c.ensureBucket(ctx, bucket); err != nil {
+		return err
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	req, err := c.newRequest(ctx, http.MethodPut, bucket, key, nil, nil)
+	if err != nil {
+		return err
+	}
+	req.Body = io.NopCloser(body)
+	req.ContentLength = size
+	req.Header.Set("Content-Type", contentType)
+	if cacheControl != "" {
+		req.Header.Set("Cache-Control", cacheControl)
+	}
+	c.signHash(req, unsignedPayload)
+	// No client timeout: a large file may take longer than the request timeout; ctx bounds it.
+	resp, err := (&http.Client{Transport: c.http.Transport}).Do(req)
+	if err != nil {
+		return fmt.Errorf("objectstore put %s: %w", key, err)
+	}
+	defer drain(resp)
+	if resp.StatusCode >= 300 {
+		return fmt.Errorf("objectstore put %s: %s", key, statusDetail(resp))
+	}
+	return nil
+}
+
 func (c *s3Client) get(ctx context.Context, bucket, key string) ([]byte, string, error) {
 	req, err := c.newRequest(ctx, http.MethodGet, bucket, key, nil, nil)
 	if err != nil {
@@ -327,10 +359,17 @@ func (c *s3Client) newRequest(ctx context.Context, method, bucket, key string, q
 
 // sign sets the SigV4 Authorization header over host, content-type and every x-amz-* header.
 func (c *s3Client) sign(req *http.Request, payload []byte) {
+	c.signHash(req, hashHex(payload))
+}
+
+// unsignedPayload lets a streamed body go out without hashing it first (S3 and R2 accept it over
+// TLS; the headers are still signed).
+const unsignedPayload = "UNSIGNED-PAYLOAD"
+
+func (c *s3Client) signHash(req *http.Request, payloadHash string) {
 	now := time.Now().UTC()
 	amzDate := now.Format("20060102T150405Z")
 	dateStamp := now.Format("20060102")
-	payloadHash := hashHex(payload)
 
 	req.Host = c.endpoint.Host
 	req.Header.Set("X-Amz-Date", amzDate)

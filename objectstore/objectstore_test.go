@@ -465,3 +465,30 @@ func TestServeRanges(t *testing.T) {
 		t.Fatalf("local missing: %v", err)
 	}
 }
+
+func TestPutStream(t *testing.T) {
+	ctx := context.Background()
+	remote, f := remoteStore(t, "")
+	k, _ := remote.Key(Owner{TenantID: "t1"}, TypeBackups, "a.zip")
+	if err := remote.PutStream(ctx, k, strings.NewReader("archive-bytes"), 13, "application/zip"); err != nil {
+		t.Fatal(err)
+	}
+	f.mu.Lock()
+	got, h := string(f.objects["priv/"+k]), f.headers["priv/"+k]
+	f.mu.Unlock()
+	if got != "archive-bytes" || h.Get("X-Amz-Content-Sha256") != unsignedPayload || h.Get("Cache-Control") != "private, no-store" {
+		t.Fatalf("remote stream: %q %v", got, h)
+	}
+
+	local, err := New("auth", Config{LocalRoot: t.TempDir(), LocalURLBase: "http://localhost:4000"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lk, _ := local.Key(Owner{TenantID: "t1"}, TypeBackups, "a.zip")
+	if err := local.PutStream(ctx, lk, strings.NewReader("archive-bytes and more"), 13, "application/zip"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _, err := local.Get(ctx, lk); err != nil || string(b) != "archive-bytes" {
+		t.Fatalf("local stream: %q %v", b, err)
+	}
+}
