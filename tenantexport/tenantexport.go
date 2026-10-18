@@ -133,7 +133,7 @@ func tenantTables(ctx context.Context, db *sql.DB, schema string, secretRe *rege
 		if err := rows.Scan(&name, &col, &typ); err != nil {
 			return nil, err
 		}
-		if skip[name] || strings.HasSuffix(name, "_bk") || strings.Contains(name, "_bk_") {
+		if skip[name] || isBackupCopy(name) {
 			continue
 		}
 		t := byName[name]
@@ -189,6 +189,12 @@ func writeTable(ctx context.Context, db *sql.DB, schema string, t table, tenantI
 		n++
 	}
 	return n, rows.Err()
+}
+
+// isBackupCopy matches hand-made table copies left from data fixes (orders_bk_20261004,
+// bk_bill_20261008_users, users_bk); they duplicate rows and are never exported.
+func isBackupCopy(name string) bool {
+	return strings.HasPrefix(name, "bk_") || strings.HasSuffix(name, "_bk") || strings.Contains(name, "_bk_")
 }
 
 func quoteIdent(s string) string { return `"` + strings.ReplaceAll(s, `"`, `""`) + `"` }

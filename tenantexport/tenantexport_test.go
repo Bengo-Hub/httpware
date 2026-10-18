@@ -18,6 +18,12 @@ import (
 )
 
 func TestPgTextArray(t *testing.T) {
+	for name, copy := range map[string]bool{"orders_bk_20261004": true, "bk_bill_20261008_users": true, "users_bk": true,
+		"bookings": false, "bank_accounts": false, "kbk_items": false} {
+		if isBackupCopy(name) != copy {
+			t.Errorf("%s: backup copy %v expected %v", name, !copy, copy)
+		}
+	}
 	if got := pgTextArray(nil); got != "{}" {
 		t.Fatalf("empty: %q", got)
 	}
