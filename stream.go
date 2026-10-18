@@ -6,11 +6,14 @@ import (
 	"time"
 )
 
-// IsStreaming reports whether r opens a long-lived connection: a WebSocket upgrade or a
-// Server-Sent Events stream.
+// IsStreaming reports whether r opens a long-lived connection: a WebSocket upgrade, a
+// Server-Sent Events stream, or a JSON Lines stream (tenant exports, which may run for minutes
+// and are gzipped already).
 func IsStreaming(r *http.Request) bool {
+	accept := r.Header.Get("Accept")
 	return strings.EqualFold(r.Header.Get("Upgrade"), "websocket") ||
-		strings.Contains(r.Header.Get("Accept"), "text/event-stream")
+		strings.Contains(accept, "text/event-stream") ||
+		strings.Contains(accept, "application/x-ndjson")
 }
 
 // BypassForStreaming wraps a middleware so it never runs on WebSocket or SSE requests.

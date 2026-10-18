@@ -220,7 +220,7 @@ time, so memory stays flat. Columns whose names look like secrets (`DefaultSecre
 password, secret, token, api key, credential, private key, pin, otp, encrypted) and the
 infrastructure tables (outbox, processed events, backups, `*_bk_*` copies) are never exported.
 
-`tenantexport.Handler(db, opts)` serves it for auth-api's tenant backups: mount it as
+`tenantexport.Handler(db, opts)` serves it for auth-api's tenant backups (v0.14.1: `IsStreaming` also matches `Accept: application/x-ndjson`, which auth-api sends, so routers that wrap Timeout and Compress in `BypassForStreaming` skip both). Mount it as
 `GET /api/v1/s2s/tenant-export` behind the service's API-key middleware and outside any
 request-timeout middleware; the tenant comes from `X-Tenant-ID`. A stream without its summary
 line is incomplete.
