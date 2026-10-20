@@ -143,6 +143,22 @@ func TestExportOnPostgres(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("right key must pass: %d", rec.Code)
 	}
+
+	// Probe: tenant with rows reports its tables, a tenant with none reports no data.
+	pr, err := Probe(ctx, db, a, Options{Service: "svc"})
+	if err != nil || !pr.HasData || len(pr.Tables) != 2 {
+		t.Fatalf("probe a: %+v %v", pr, err)
+	}
+	if pr, _ = Probe(ctx, db, uuid.New(), Options{Service: "svc"}); pr.HasData || len(pr.Tables) != 0 {
+		t.Fatalf("probe empty tenant: %+v", pr)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/export?probe=1", nil)
+	req.Header.Set("X-Tenant-ID", uuid.New().String())
+	Handler(db, Options{Service: "svc"}).ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" || !strings.Contains(rec.Body.String(), `"has_data":false`) {
+		t.Fatalf("probe handler: %d %s", rec.Code, rec.Body.String())
+	}
 }
 
 func readLines(t *testing.T, gzBytes []byte) []map[string]any {

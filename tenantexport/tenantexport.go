@@ -110,6 +110,53 @@ func Write(ctx context.Context, db *sql.DB, tenantID uuid.UUID, w io.Writer, opt
 	return sum, gz.Close()
 }
 
+// ProbeResult says whether a tenant has any data in this service, without reading the rows.
+type ProbeResult struct {
+	Service  string   `json:"service"`
+	TenantID string   `json:"tenant_id"`
+	HasData  bool     `json:"has_data"`
+	Tables   []string `json:"tables_with_data"`
+}
+
+// Probe reports which tenant tables hold at least one row for the tenant. It runs one indexed
+// EXISTS per table (LIMIT 1 semantics), so it stays cheap however large the tenant is. Tables
+// that cannot be read are ignored; a service that cannot be probed simply gets a full export.
+func Probe(ctx context.Context, db *sql.DB, tenantID uuid.UUID, opt Options) (ProbeResult, error) {
+	res := ProbeResult{Service: opt.Service, TenantID: tenantID.String(), Tables: []string{}}
+	secretRe := opt.SecretColumns
+	if secretRe == nil {
+		secretRe = DefaultSecretColumns
+	}
+	var schema string
+	if err := db.QueryRowContext(ctx, `SELECT current_schema()`).Scan(&schema); err != nil {
+		return res, fmt.Errorf("tenantexport: schema: %w", err)
+	}
+	tables, err := tenantTables(ctx, db, schema, secretRe, append(append([]string{}, alwaysExcluded...), opt.ExcludeTables...))
+	if err != nil {
+		return res, err
+	}
+	for _, t := range tables {
+		cast := ""
+		if t.tenantUUID {
+			cast = "::uuid"
+		}
+		q := fmt.Sprintf(`SELECT EXISTS (SELECT 1 FROM %s.%s x WHERE x.tenant_id = $1%s)`,
+			quoteIdent(schema), quoteIdent(t.name), cast)
+		var has bool
+		if err := db.QueryRowContext(ctx, q, tenantID.String()).Scan(&has); err != nil {
+			if ctx.Err() != nil {
+				return res, ctx.Err()
+			}
+			continue
+		}
+		if has {
+			res.Tables = append(res.Tables, t.name)
+		}
+	}
+	res.HasData = len(res.Tables) > 0
+	return res, nil
+}
+
 func tenantTables(ctx context.Context, db *sql.DB, schema string, secretRe *regexp.Regexp, exclude []string) ([]table, error) {
 	rows, err := db.QueryContext(ctx, `
 		SELECT c.table_name, c.column_name, c.data_type
@@ -220,6 +267,19 @@ func Handler(db *sql.DB, opt Options) http.Handler {
 		tenantID, err := uuid.Parse(r.Header.Get("X-Tenant-ID"))
 		if err != nil {
 			http.Error(w, `{"error":"X-Tenant-ID must be a tenant uuid"}`, http.StatusBadRequest)
+			return
+		}
+		// ?probe=1 answers "does this tenant have any data here" as small JSON, so the caller can
+		// skip empty services instead of archiving a header-only stream.
+		if r.URL.Query().Get("probe") == "1" {
+			res, err := Probe(r.Context(), db, tenantID, opt)
+			if err != nil {
+				http.Error(w, `{"error":"probe failed"}`, http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Cache-Control", "no-store")
+			_ = json.NewEncoder(w).Encode(res)
 			return
 		}
 		// A large tenant takes longer than the server's write timeout; lift it for this response.
