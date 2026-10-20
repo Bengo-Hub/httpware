@@ -224,6 +224,12 @@ infrastructure tables (outbox, processed events, backups, `*_bk_*` copies) are n
 `GET /api/v1/s2s/tenant-export` behind the service's API-key middleware (or set `Options.InternalKey`, v0.14.2, to have the handler check `X-API-Key` itself) and outside any
 request-timeout middleware; the tenant comes from `X-Tenant-ID`. A stream without its summary
 line is incomplete.
+
+`tenantexport.Probe(ctx, db, tenantID, opts)` (v0.15.0) reports which tenant tables hold at least one
+row, with one indexed `EXISTS` per table, and `Handler` answers `GET ...?probe=1` with that as small
+JSON (`has_data`, `tables_with_data`). auth-api probes each covered service first and skips the ones
+where the tenant has no rows. A service on an older version answers the probe with the export stream,
+which the caller detects from the content type, so bumping is optional but saves a full export.
 - Mount `store.MediaHandler()` at `/media` in every service. It serves the media volume (new files
   in local mode, and old `/media/<rel>` paths not yet relinked; private ones, named by
   `WithLegacyPrivate`, only with a link signed by `WithLocalSigner`). With object storage a public
