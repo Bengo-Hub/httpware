@@ -20,6 +20,9 @@ import (
 type MediaSigner struct {
 	key []byte
 	ttl time.Duration
+	// unkeyed is set when the signer was built from an empty secret: every signature it could make
+	// would be forgeable, so it verifies nothing.
+	unkeyed bool
 }
 
 // NewMediaSigner derives a signing key from secret for this purpose only (so a shared service
@@ -30,7 +33,7 @@ func NewMediaSigner(secret string, ttl time.Duration) *MediaSigner {
 	}
 	m := hmac.New(sha256.New, []byte(secret))
 	m.Write([]byte("codevertex-media-url-signing-v1"))
-	return &MediaSigner{key: m.Sum(nil), ttl: ttl}
+	return &MediaSigner{key: m.Sum(nil), ttl: ttl, unkeyed: secret == ""}
 }
 
 func (s *MediaSigner) mac(mediaPath string, exp int64) string {
@@ -66,7 +69,7 @@ func (s *MediaSigner) Sign(rawURL string) string {
 // Verify reports whether q carries a valid, unexpired signature for mediaPath (the path below
 // the media root, e.g. "/uploads/patients/x.jpg").
 func (s *MediaSigner) Verify(mediaPath string, q url.Values) bool {
-	if s == nil {
+	if s == nil || s.unkeyed {
 		return false
 	}
 	exp, err := strconv.ParseInt(q.Get("exp"), 10, 64)

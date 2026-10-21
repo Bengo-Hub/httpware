@@ -19,6 +19,10 @@ type MediaOptions struct {
 	// Private reports paths that hold personal or sensitive files (e.g. KYC documents). They
 	// get Cache-Control: private, no-store and no cross-origin read header, so no shared cache
 	// (Cloudflare, proxies) or service worker keeps a copy. Defaults to none.
+	//
+	// Private on its own only changes those headers; it does not check who is asking. Set Signer to
+	// make the handler itself refuse unsigned requests, or mount the handler behind an auth check.
+	// A handler with Private paths, no Signer and no auth in front serves those files to anyone.
 	Private func(name string) bool
 	// Signer, when set, makes Private files require a valid signed URL (MediaSigner.Sign);
 	// unsigned or expired requests get 404, as if the file did not exist.

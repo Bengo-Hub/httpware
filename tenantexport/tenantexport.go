@@ -43,13 +43,21 @@ type Options struct {
 	ExcludeTables []string
 	// SecretColumns overrides the column-name pattern of values that are never exported.
 	SecretColumns *regexp.Regexp
-	// InternalKey, when set, makes Handler check the X-API-Key header itself (constant time), for
-	// services that have no S2S route group with their own key middleware.
+	// InternalKey makes Handler check the X-API-Key header itself (constant time). Handler refuses to
+	// serve (503) when it is empty, so a service that forgot to configure it never exports a tenant
+	// to an anonymous caller.
 	InternalKey string
+	// AllowUnauthenticated lets Handler serve with no InternalKey, for a service that guards the route
+	// with its own key middleware (httpware.RequireServiceKey). Prefer setting InternalKey as well.
+	AllowUnauthenticated bool
 }
 
-// DefaultSecretColumns matches column names whose values must never leave the service.
-var DefaultSecretColumns = regexp.MustCompile(`(?i)(password|passwd|secret|token|api_?key|credential|private_?key|pin_hash|^pin$|otp|encrypted)`)
+// DefaultSecretColumns matches column names whose values must never leave the service. token and
+// otp match as whole words (refresh_token, otp_code), so a count such as tokens_used is kept.
+var DefaultSecretColumns = regexp.MustCompile(`(?i)(password|passwd|secret|api_?key|credential|private_?key|pin_hash|^pin$|encrypted|(^|_)token($|_)|_tokens$|(^|_)otp($|_))`)
+
+// safeFileName keeps a service name usable inside a Content-Disposition filename.
+var safeFileName = regexp.MustCompile(`[^A-Za-z0-9_.-]`)
 
 // alwaysExcluded are infrastructure tables that hold no tenant business data.
 var alwaysExcluded = []string{"outbox_events", "processed_events", "backups", "backup_destinations", "atlas_schema_revisions"}
@@ -260,7 +268,13 @@ func pgTextArray(items []string) string {
 // X-Tenant-ID header.
 func Handler(db *sql.DB, opt Options) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if opt.InternalKey == "" && !opt.AllowUnauthenticated {
+			w.Header().Set("Content-Type", "application/json")
+			http.Error(w, `{"error":"tenant export is not configured"}`, http.StatusServiceUnavailable)
+			return
+		}
 		if opt.InternalKey != "" && subtle.ConstantTimeCompare([]byte(r.Header.Get("X-API-Key")), []byte(opt.InternalKey)) != 1 {
+			w.Header().Set("Content-Type", "application/json")
 			http.Error(w, `{"error":"invalid or missing service key"}`, http.StatusUnauthorized)
 			return
 		}
@@ -287,7 +301,7 @@ func Handler(db *sql.DB, opt Options) http.Handler {
 		_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
 		w.Header().Set("Content-Type", ContentType)
 		w.Header().Set("Cache-Control", "no-store")
-		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.jsonl.gz"`, opt.Service))
+		w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s.jsonl.gz"`, safeFileName.ReplaceAllString(opt.Service, "_")))
 		// Errors after the first byte cannot change the status; the missing summary line tells
 		// the caller the stream is incomplete.
 		_, _ = Write(r.Context(), db, tenantID, w, opt)

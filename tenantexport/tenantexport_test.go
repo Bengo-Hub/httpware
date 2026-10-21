@@ -31,7 +31,8 @@ func TestPgTextArray(t *testing.T) {
 		t.Fatalf("quoted: %q", got)
 	}
 	for col, secret := range map[string]bool{"password_hash": true, "api_key": true, "refresh_token": true,
-		"pin": true, "pin_hash": true, "encrypted_value": true, "name": false, "spinner": false, "tenant_id": false} {
+		"pin": true, "pin_hash": true, "encrypted_value": true, "otp_code": true, "access_token_hash": true,
+		"name": false, "spinner": false, "tenant_id": false, "tokens_used": false, "hotpot": false} {
 		if DefaultSecretColumns.MatchString(col) != secret {
 			t.Errorf("%s: secret=%v expected %v", col, !secret, secret)
 		}
@@ -114,7 +115,7 @@ func TestExportOnPostgres(t *testing.T) {
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/export", nil)
 	req.Header.Set("X-Tenant-ID", b.String())
-	Handler(db, Options{Service: "svc"}).ServeHTTP(rec, req)
+	Handler(db, Options{Service: "svc", AllowUnauthenticated: true}).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != ContentType {
 		t.Fatalf("handler %d %q", rec.Code, rec.Header().Get("Content-Type"))
 	}
@@ -122,7 +123,7 @@ func TestExportOnPostgres(t *testing.T) {
 		t.Fatalf("tenant b export: %v", l)
 	}
 	rec = httptest.NewRecorder()
-	Handler(db, Options{Service: "svc"}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/export", nil))
+	Handler(db, Options{Service: "svc", AllowUnauthenticated: true}).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/export", nil))
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("missing tenant must be refused: %d", rec.Code)
 	}
@@ -155,7 +156,7 @@ func TestExportOnPostgres(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/export?probe=1", nil)
 	req.Header.Set("X-Tenant-ID", uuid.New().String())
-	Handler(db, Options{Service: "svc"}).ServeHTTP(rec, req)
+	Handler(db, Options{Service: "svc", AllowUnauthenticated: true}).ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "application/json" || !strings.Contains(rec.Body.String(), `"has_data":false`) {
 		t.Fatalf("probe handler: %d %s", rec.Code, rec.Body.String())
 	}

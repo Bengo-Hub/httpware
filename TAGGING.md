@@ -1,65 +1,83 @@
-# Tagging Guide - shared-httpware
+# Tagging Guide - httpware
+
+The module is `github.com/Bengo-Hub/httpware` (repository `Bengo-Hub/httpware`).
 
 ## Version Format
 
 Follow Semantic Versioning (SemVer): `vMAJOR.MINOR.PATCH`
 
 - **MAJOR**: Breaking changes
-- **MINOR**: New features (backward compatible)
+- **MINOR**: New features, or a behaviour change a service must opt into in code
 - **PATCH**: Bug fixes (backward compatible)
+
+While the module is v0.x, a security-driven behaviour change (for example fail-closed checks) ships as a
+MINOR and is listed under "Behaviour changes" in the release notes.
 
 ## Creating a New Release
 
-### 1. Ensure All Changes Are Committed
+### 1. Test and commit
 
 ```bash
 cd shared/httpware
-git status
-git add .
-git commit -m "feat: description of changes"
+gofmt -l .            # only files you did not touch may be listed
+go vet ./... && go test ./... -count=1
+git add <the files you changed>
+git commit -m "feat(scope): description of changes"
 ```
 
-### 2. Create and Push Tag
+The tenantexport database tests skip without `TENANTEXPORT_TEST_POSTGRES_URL`; run them once against a
+scratch database before tagging a change to that package.
+
+### 2. Create and push the tag
 
 ```bash
-# Create annotated tag
-git tag -a v0.1.0 -m "Initial release with RequestID, Tenant, Logging, Recover, CORS middleware"
-
-# Push tag to remote
-git push origin v0.1.0
+git tag v0.16.0
+git push origin HEAD v0.16.0
 ```
 
-### 3. Verify on GitHub
+### 3. Move the services to it
 
-Check that the tag appears at:
-`https://github.com/Bengo-Hub/shared-httpware/releases`
-
-## Using Specific Version in Services
+Services pin httpware in `go.mod` and are not updated by the tag alone. Always use the latest tag:
 
 ```bash
-# Install specific version
-go get github.com/Bengo-Hub/shared-httpware@v0.1.0
-
-# Update to latest
-go get -u github.com/Bengo-Hub/shared-httpware
+git tag --sort=-v:refname | head -1      # the latest tag
+go get github.com/Bengo-Hub/httpware@<latest>
+go mod tidy && go build ./... && go test ./...
 ```
 
-## Release Notes Template
+Build and commit one service at a time.
+
+## Release notes template
 
 ```markdown
-## v0.1.0 - Initial Release
+## vX.Y.Z
 
 ### Features
-- RequestID middleware for distributed tracing
-- Tenant middleware for multi-tenant support
-- Logging middleware with structured logging
-- Recover middleware for panic recovery
-- CORS middleware with configurable options
+- ...
 
-### Breaking Changes
-- None (initial release)
+### Behaviour changes (services must check these when they bump)
+- ...
 
-### Dependencies
-- github.com/google/uuid v1.6.0
-- go.uber.org/zap v1.27.0
+### Fixes
+- ...
 ```
+
+## v0.16.0
+
+### Features
+- `RequireServiceKey`, `ValidServiceKey`, `HeaderAPIKey`: one constant-time, fail-closed service key check.
+- `StandardCORS`: the fleet's one CORS policy (`CORS` rebuilt around it).
+- `tenantexport.Options.AllowUnauthenticated`.
+
+### Behaviour changes
+- `TenantV2` answers 403 when a header or URL tenant disagrees with the caller's claims (platform owners and
+  requests without claims are unaffected; `TenantConfig.AllowMismatch` turns it off).
+- `CORS`: `Vary: Origin` always, 403 for a preflight from a disallowed origin, `*` never sends credentials.
+- `tenantexport.Handler` answers 503 unless `InternalKey` is set or `AllowUnauthenticated` is true.
+- `RequestID` replaces a malformed incoming `X-Request-ID`.
+- `Recover` re-panics `http.ErrAbortHandler` and does not write twice.
+- `MediaSigner` built from an empty secret verifies nothing.
+- `DefaultSecretColumns` matches `token` and `otp` as whole words (`tokens_used` is exported).
+
+### Fixes
+- `money.Split` with a negative total.

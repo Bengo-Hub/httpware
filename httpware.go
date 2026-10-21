@@ -1,31 +1,37 @@
 // Package httpware provides standardized HTTP middleware for Codevertex microservices.
 //
-// This package eliminates code duplication by providing common middleware functions
-// that were previously duplicated across all services:
-//   - RequestID: Generates/propagates request IDs for tracing
-//   - Tenant: Extracts tenant ID from JWT claims or headers
-//   - Logging: Structured HTTP request logging
-//   - Recover: Panic recovery with logging
-//   - CORS: Cross-Origin Resource Sharing headers
+// One implementation of what every service used to copy:
+//   - RequestID: generates or propagates a (validated) request ID for tracing
+//   - Tenant / TenantV2: resolves the tenant from JWT claims, headers and the URL, and refuses a
+//     request whose header or URL names a different tenant than the caller's token
+//   - Logging: structured request logging (path only, never the query string)
+//   - Recover: panic recovery with logging
+//   - CORS / StandardCORS (cors.go): the one browser cross-origin policy
+//   - RequireServiceKey / ValidServiceKey (servicekey.go): constant-time, fail-closed service key check
+//   - StaticMedia, MediaSigner (media.go, media_sign.go), IsStreaming / BypassForStreaming (stream.go)
 //
-// Usage with Chi router:
+// Sub-packages: contact, money, pii, objectstore, tenantexport.
 //
-//	import httpware "github.com/Bengo-Hub/httpware"
+// Usage with Chi:
 //
 //	r := chi.NewRouter()
 //	r.Use(httpware.RequestID)
-//	r.Use(httpware.Tenant)
 //	r.Use(httpware.Recover(logger))
 //	r.Use(httpware.Logging(logger))
+//	r.Use(httpware.CORS(httpware.StandardCORS(origins)))
+//	r.Use(httpware.TenantV2(httpware.TenantConfig{ /* claims extractor, URL param */ }))
+//	r.With(httpware.RequireServiceKey(cfg.Auth.APIKey)).Get("/api/v1/s2s/thing", handler)
 package httpware
 
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,12 +66,31 @@ const (
 	HeaderOutletID = "X-Outlet-ID"
 )
 
-// RequestID middleware extracts request ID from X-Request-ID header or generates a new one.
-// The request ID is stored in context and added to response headers for tracing.
+// maxRequestIDLen bounds a propagated request ID.
+const maxRequestIDLen = 128
+
+// validRequestID accepts only short IDs made of letters, digits and "-_.:", so a caller cannot put
+// newlines or markup into logs and response headers through X-Request-ID.
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for _, c := range id {
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_', c == '.', c == ':':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// RequestID middleware takes the request ID from X-Request-ID when it is well formed, otherwise
+// generates one. The ID is stored in context and added to the response headers for tracing.
 func RequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		id := r.Header.Get(HeaderRequestID)
-		if id == "" {
+		if !validRequestID(id) {
 			id = uuid.New().String()
 		}
 		w.Header().Set(HeaderRequestID, id)
@@ -75,7 +100,8 @@ func RequestID(next http.Handler) http.Handler {
 }
 
 // Tenant middleware extracts tenant ID from X-Tenant-ID header and stores in context.
-// If header is not present, the request continues without tenant context.
+// If header is not present, the request continues without tenant context. It trusts the header,
+// so use it only where authentication and tenant checks run afterwards; TenantV2 is the safer form.
 func Tenant(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tenantID := r.Header.Get(HeaderTenantID)
@@ -103,6 +129,10 @@ type TenantConfig struct {
 
 	// Required causes the middleware to return 400 if no tenant ID is resolved.
 	Required bool
+
+	// AllowMismatch turns off the mismatch check below. Leave it false; it exists only so a service
+	// with a known legacy client can be migrated in steps.
+	AllowMismatch bool
 }
 
 // TenantV2 middleware resolves tenant ID and slug via chained extraction:
@@ -112,6 +142,12 @@ type TenantConfig struct {
 //
 // Each source can fill in missing values without overriding already-resolved ones.
 // The resolved values are stored in context via TenantIDKey and TenantSlugKey.
+//
+// When the caller has claims and is not a platform owner, a header or URL parameter that names a
+// different tenant than the claims is refused with 403: the token decides which tenant a request is
+// for, and a client-supplied header or path must never point it elsewhere. Platform owners may scope
+// a request to any tenant through the URL, and requests without claims (service-to-service calls,
+// public routes) keep the header and URL values as before.
 func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 	if cfg.URLParamName == "" {
 		cfg.URLParamName = "tenant"
@@ -120,7 +156,8 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			var tenantID, tenantSlug string
-			var isPlatformOwner bool
+			var claimTenantID, claimTenantSlug string
+			var isPlatformOwner, haveClaims bool
 
 			// 1. JWT claims (highest priority)
 			if cfg.ClaimsExtractor != nil {
@@ -128,19 +165,27 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 					tenantID = claimTID
 					tenantSlug = claimSlug
 					isPlatformOwner = claimIsPO
+					claimTenantID, claimTenantSlug = claimTID, claimSlug
+					haveClaims = true
 				}
+			}
+			enforce := haveClaims && !isPlatformOwner && !cfg.AllowMismatch
+			mismatch := func(supplied, claimed string) bool {
+				return enforce && supplied != "" && claimed != "" && !strings.EqualFold(supplied, claimed)
 			}
 
 			// 2. HTTP headers (fill gaps)
-			if tenantID == "" {
-				if hdr := r.Header.Get(HeaderTenantID); hdr != "" {
-					tenantID = hdr
-				}
+			hdrID := r.Header.Get(HeaderTenantID)
+			hdrSlug := r.Header.Get(HeaderTenantSlug)
+			if mismatch(hdrID, claimTenantID) || mismatch(hdrSlug, claimTenantSlug) {
+				writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+				return
 			}
-			if tenantSlug == "" {
-				if hdr := r.Header.Get(HeaderTenantSlug); hdr != "" {
-					tenantSlug = hdr
-				}
+			if tenantID == "" && hdrID != "" {
+				tenantID = hdrID
+			}
+			if tenantSlug == "" && hdrSlug != "" {
+				tenantSlug = hdrSlug
 			}
 
 			// 3. URL path parameter (fill gaps — could be UUID or slug)
@@ -148,14 +193,21 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			// requests to any tenant (e.g. GET /v1/urban-loft/inventory/... as superuser).
 			if cfg.URLParamFunc != nil {
 				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" {
-					// Determine if param is a UUID or a slug
 					if _, err := uuid.Parse(param); err == nil {
 						// It's a UUID → use as tenant ID (override for platform owners)
+						if mismatch(param, claimTenantID) {
+							writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+							return
+						}
 						if tenantID == "" || isPlatformOwner {
 							tenantID = param
 						}
 					} else {
 						// It's a slug → use as tenant slug (override for platform owners)
+						if mismatch(param, claimTenantSlug) {
+							writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+							return
+						}
 						if tenantSlug == "" || isPlatformOwner {
 							tenantSlug = param
 							if isPlatformOwner {
@@ -168,7 +220,7 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 
 			// Enforce required tenant
 			if cfg.Required && tenantID == "" && tenantSlug == "" {
-				http.Error(w, `{"error":"tenant context required"}`, http.StatusBadRequest)
+				writeJSONError(w, http.StatusBadRequest, "tenant context required")
 				return
 			}
 
@@ -189,8 +241,15 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 	}
 }
 
+// writeJSONError answers with a small JSON error body and the right content type.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
 // Logging middleware logs HTTP requests with structured fields.
-// Logs include: method, path, status code, duration, and request ID.
+// Logs include: method, path (never the query string), status code, duration, and request ID.
 func Logging(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -222,13 +281,19 @@ func Logging(log *zap.Logger) func(http.Handler) http.Handler {
 	}
 }
 
-// Recover middleware recovers from panics and logs the error.
-// Returns HTTP 500 Internal Server Error to the client.
+// Recover middleware recovers from panics and logs the error. It answers 500 unless the handler had
+// already started the response (a second write would only corrupt it). A panic with
+// http.ErrAbortHandler is the standard way to abort a response on purpose, so it is passed on to the
+// server instead of being logged as a crash.
 func Recover(log *zap.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			rw := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 			defer func() {
 				if err := recover(); err != nil {
+					if err == http.ErrAbortHandler {
+						panic(err)
+					}
 					log.Error("panic recovered",
 						zap.Any("error", err),
 						zap.String("path", r.URL.Path),
@@ -236,69 +301,12 @@ func Recover(log *zap.Logger) func(http.Handler) http.Handler {
 						zap.String("request_id", GetRequestID(r.Context())),
 						zap.String("stack", string(debug.Stack())),
 					)
-					http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					if !rw.wrote {
+						http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+					}
 				}
 			}()
-			next.ServeHTTP(w, r)
-		})
-	}
-}
-
-// CORSConfig holds configuration for the CORS middleware.
-type CORSConfig struct {
-	AllowedOrigins   []string
-	AllowedMethods   []string
-	AllowedHeaders   []string
-	AllowCredentials bool
-	MaxAge           int // in seconds
-}
-
-// DefaultCORSConfig returns a secure CORS configuration with explicit origins.
-// In production, override AllowedOrigins via environment configuration.
-func DefaultCORSConfig() CORSConfig {
-	return CORSConfig{
-		AllowedOrigins:   []string{"https://accounts.codevertexafrica.com", "https://ordering.codevertexafrica.com", "https://pos.codevertexafrica.com"},
-		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID", "X-Tenant-ID", "X-Tenant-Slug", "X-Outlet-ID"},
-		AllowCredentials: true,
-		MaxAge:           86400,
-	}
-}
-
-// CORS middleware adds Cross-Origin Resource Sharing headers.
-func CORS(cfg CORSConfig) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			origin := r.Header.Get("Origin")
-
-			// Check if origin is allowed
-			allowed := false
-			for _, o := range cfg.AllowedOrigins {
-				if o == "*" || o == origin {
-					allowed = true
-					break
-				}
-			}
-
-			if allowed && origin != "" {
-				w.Header().Set("Access-Control-Allow-Origin", origin)
-				w.Header().Set("Access-Control-Allow-Methods", joinStrings(cfg.AllowedMethods, ", "))
-				w.Header().Set("Access-Control-Allow-Headers", joinStrings(cfg.AllowedHeaders, ", "))
-				if cfg.AllowCredentials {
-					w.Header().Set("Access-Control-Allow-Credentials", "true")
-				}
-				if cfg.MaxAge > 0 {
-					w.Header().Set("Access-Control-Max-Age", formatInt(cfg.MaxAge))
-				}
-			}
-
-			// Handle preflight requests
-			if r.Method == http.MethodOptions {
-				w.WriteHeader(http.StatusNoContent)
-				return
-			}
-
-			next.ServeHTTP(w, r)
+			next.ServeHTTP(rw, r)
 		})
 	}
 }
@@ -383,7 +391,8 @@ func OutletHeader(r *http.Request) string {
 	return r.Header.Get(HeaderOutletID)
 }
 
-// responseWriter wraps http.ResponseWriter to capture status code.
+// responseWriter wraps http.ResponseWriter to capture the status code and whether the response has
+// started.
 //
 // Embedding http.ResponseWriter as an INTERFACE field only promotes the three methods
 // declared on that interface (Header/Write/WriteHeader) — Go does not promote any other
@@ -394,11 +403,18 @@ func OutletHeader(r *http.Request) string {
 type responseWriter struct {
 	http.ResponseWriter
 	statusCode int
+	wrote      bool
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.statusCode = code
+	rw.wrote = true
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	rw.wrote = true
+	return rw.ResponseWriter.Write(b)
 }
 
 // Hijack implements http.Hijacker by delegating to the wrapped writer. Required by
@@ -409,6 +425,7 @@ func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if !ok {
 		return nil, nil, fmt.Errorf("httpware: underlying %T does not implement http.Hijacker", rw.ResponseWriter)
 	}
+	rw.wrote = true
 	return hj.Hijack()
 }
 
@@ -422,35 +439,8 @@ func (rw *responseWriter) Unwrap() http.ResponseWriter {
 // (Server-Sent Events) streaming, which must flush after every event to reach the client
 // immediately instead of sitting in a buffer — the same promotion gap as Hijack above.
 func (rw *responseWriter) Flush() {
+	rw.wrote = true
 	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
 		f.Flush()
 	}
-}
-
-// joinStrings joins strings with a separator.
-func joinStrings(strs []string, sep string) string {
-	if len(strs) == 0 {
-		return ""
-	}
-	result := strs[0]
-	for i := 1; i < len(strs); i++ {
-		result += sep + strs[i]
-	}
-	return result
-}
-
-// formatInt converts an int to string without importing strconv.
-func formatInt(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	if n < 0 {
-		return "-" + formatInt(-n)
-	}
-	digits := ""
-	for n > 0 {
-		digits = string(rune('0'+n%10)) + digits
-		n /= 10
-	}
-	return digits
 }

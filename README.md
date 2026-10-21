@@ -6,16 +6,24 @@ Standardized HTTP middleware for Codevertex microservices, eliminating code dupl
 
 ## Features
 
-- ✅ **RequestID** - Request ID generation/propagation for distributed tracing
-- ✅ **Tenant** - Tenant ID extraction from headers
-- ✅ **Logging** - Structured HTTP request logging with Zap
-- ✅ **Recover** - Panic recovery with stack trace logging
-- ✅ **CORS** - Cross-Origin Resource Sharing headers
+- **RequestID** - request ID propagation for tracing (a malformed incoming ID is replaced)
+- **Tenant / TenantV2** - tenant resolution from JWT claims, headers and the URL; `TenantV2` refuses a
+  header or URL that names a different tenant than the caller's token
+- **Logging** - structured request logging (path only, never the query string)
+- **Recover** - panic recovery with a stack trace; passes `http.ErrAbortHandler` on and never writes
+  a second response
+- **CORS / StandardCORS** - the one browser cross-origin policy for every service
+- **RequireServiceKey / ValidServiceKey** - constant-time, fail-closed service-to-service key check
+- **StaticMedia, MediaSigner, IsStreaming / BypassForStreaming** - media serving and streaming helpers
+- Sub-packages: `contact`, `money`, `pii`, `objectstore`, `tenantexport`
 
 ## Installation
 
+Always take the latest tag (`git tag --sort=-v:refname | head -1`); a service pinned to an old tag
+misses security fixes.
+
 ```bash
-go get github.com/Bengo-Hub/httpware@v0.1.0
+go get github.com/Bengo-Hub/httpware@v0.16.0
 ```
 
 ## Usage
@@ -95,19 +103,36 @@ ctx = httpware.WithUserID(ctx, "user-789")
 
 ### CORS Configuration
 
-```go
-// Default permissive config (for development)
-r.Use(httpware.CORS(httpware.DefaultCORSConfig()))
+Every service uses `StandardCORS` with its own origins; do not hand-roll another list.
 
-// Custom config (for production)
-r.Use(httpware.CORS(httpware.CORSConfig{
-    AllowedOrigins:   []string{"https://example.com", "https://app.example.com"},
-    AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-    AllowedHeaders:   []string{"Content-Type", "Authorization", "X-Request-ID"},
-    AllowCredentials: true,
-    MaxAge:           86400,
+```go
+// origins come from the service's own config (exact origins or "https://*.example.com").
+r.Use(httpware.CORS(httpware.StandardCORS(cfg.HTTP.AllowedOrigins)))
+
+// Headers only this service's clients send (a device key, a widget mode) are added, not copied:
+r.Use(httpware.CORS(httpware.StandardCORS(origins, "X-Device-Key")))
+```
+
+- Every response carries `Vary: Origin`. A request without an `Origin` header passes straight through.
+- A preflight from an origin that is not allowed is answered 403 with no CORS headers; an allowed one
+  gets 204 with the methods, headers and `Max-Age`.
+- The `*` origin answers `Access-Control-Allow-Origin: *` and never sends credentials.
+
+### Service-to-service key
+
+```go
+s2s := r.With(httpware.RequireServiceKey(cfg.Auth.APIKey))
+s2s.Get("/api/v1/s2s/tenant-export", exportHandler)
+
+// Attach a service principal to the request once the key matched:
+httpware.RequireServiceKey(key, httpware.OnServiceAuthorized(func(r *http.Request) *http.Request {
+    return r.WithContext(withInternalCaller(r.Context()))
 }))
 ```
+
+The comparison is constant time, and an empty configured key refuses every request (401) instead of
+accepting every request. `ValidServiceKey(r, key)` is the same check for code that cannot use
+middleware.
 
 ### StaticMedia (v0.6.0)
 
@@ -221,7 +246,7 @@ password, secret, token, api key, credential, private key, pin, otp, encrypted) 
 infrastructure tables (outbox, processed events, backups, `*_bk_*` copies) are never exported.
 
 `tenantexport.Handler(db, opts)` serves it for auth-api's tenant backups (v0.14.1: `IsStreaming` also matches `Accept: application/x-ndjson`, which auth-api sends, so routers that wrap Timeout and Compress in `BypassForStreaming` skip both). Mount it as
-`GET /api/v1/s2s/tenant-export` behind the service's API-key middleware (or set `Options.InternalKey`, v0.14.2, to have the handler check `X-API-Key` itself) and outside any
+`GET /api/v1/s2s/tenant-export` and set `Options.InternalKey` so the handler checks `X-API-Key` itself (since v0.16.0 it answers 503 when no key is set, unless `Options.AllowUnauthenticated` is true for a route already behind `RequireServiceKey`), and mount it outside any
 request-timeout middleware; the tenant comes from `X-Tenant-ID`. A stream without its summary
 line is incomplete.
 
@@ -272,16 +297,22 @@ The currency table mirrors `CURRENCY_META` in shared-ui-lib; keep the two in ste
 
 ### RequestID
 
-- Extracts `X-Request-ID` header if present
-- Generates new UUID if header is missing
-- Adds request ID to response headers
+- Keeps `X-Request-ID` when it is short and made of letters, digits and `-_.:`; otherwise generates a UUID
+- Adds the request ID to response headers
 - Stores in context for downstream use
 
 ### Tenant
 
-- Extracts `X-Tenant-ID` header
-- Stores in context for multi-tenant queries
-- Skips silently if header not present
+- Extracts `X-Tenant-ID` header and stores it in context. It trusts the header, so use it only where
+  authentication and a tenant check run afterwards; `TenantV2` is the safer form.
+
+### TenantV2
+
+Resolves the tenant from JWT claims, then `X-Tenant-ID` / `X-Tenant-Slug`, then the URL parameter.
+When the caller has claims and is not a platform owner, a header or URL value that names a different
+tenant than the claims is refused with 403 (JSON). Platform owners may scope a request to any tenant
+through the URL, and requests without claims (service calls, public routes) keep the header and URL
+values. `TenantConfig.AllowMismatch` turns the check off for a service migrating in steps.
 
 ### Logging
 
@@ -295,9 +326,9 @@ Logs each request with:
 ### Recover
 
 - Catches panics in handlers
-- Logs error with stack trace
-- Returns HTTP 500 to client
-- Includes request ID in error log
+- Logs error with stack trace and request ID
+- Returns HTTP 500 unless the response had already started (no second write)
+- Re-panics `http.ErrAbortHandler` so a deliberate abort reaches the server
 
 ## Migration from Local Middleware
 
@@ -334,6 +365,9 @@ Then remove `internal/shared/middleware/` directory.
 |--------|----------|---------|
 | `X-Request-ID` | `HeaderRequestID` | Distributed tracing |
 | `X-Tenant-ID` | `HeaderTenantID` | Multi-tenant isolation |
+| `X-Tenant-Slug` | `HeaderTenantSlug` | Tenant slug (checked against the token by `TenantV2`) |
+| `X-Outlet-ID` | `HeaderOutletID` | Active outlet or branch |
+| `X-API-Key` | `HeaderAPIKey` | Shared service-to-service key |
 
 ## Context Keys
 
@@ -342,17 +376,13 @@ Then remove `internal/shared/middleware/` directory.
 | `RequestIDKey` | `contextKey` | Request tracing |
 | `TenantIDKey` | `contextKey` | Tenant isolation |
 | `UserIDKey` | `contextKey` | User identification |
+| `TenantSlugKey` | `contextKey` | Tenant slug |
+| `OutletIDKey` | `contextKey` | Resolved outlet |
+| `IsPlatformOwnerKey` | `contextKey` | Platform owner flag |
 
 ## Services Using This Library
 
-- inventory-service
-- pos-service
-- ordering-service
-- logistics-service
-- finance-service
-- notifications-service
-- projects-service
-- iot-service
-- subscription-service
-- ticketing-service
-- auth-service
+pos-api, treasury-api, inventory-api, ordering-backend, logistics-api, erp-api, marketflow-api,
+notifications-api, subscriptions-api, auth-api, hospital-api, library-api, maskani-api, projects-api
+and ticketing-api. Keep them on the latest tag; the older ones (below v0.15.0) lack the tenant export
+probe, and below v0.16.0 lack `RequireServiceKey`, the fixed CORS and the `TenantV2` mismatch check.

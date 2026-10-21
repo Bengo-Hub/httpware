@@ -98,9 +98,21 @@ func Convert(amount, rate float64, toCurrency string) float64 {
 // without losing or inventing a cent. weights, when given, must have n entries and parts are
 // proportional to them; with no weights the split is even. It returns nil when n is below 1, the
 // weights do not match n, any weight is negative, or the weights are all zero.
+//
+// A negative total (a refund or credit note) is split the same way and every part is negative, so
+// the parts still add back to exactly total.
 func Split(total float64, dp int, n int, weights ...float64) []float64 {
 	if n < 1 || (len(weights) != 0 && len(weights) != n) {
 		return nil
+	}
+	if total < 0 {
+		parts := Split(-total, dp, n, weights...)
+		for i := range parts {
+			if parts[i] != 0 {
+				parts[i] = -parts[i]
+			}
+		}
+		return parts
 	}
 	w := weights
 	if len(w) == 0 {
