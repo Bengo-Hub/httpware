@@ -236,6 +236,23 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 - `PutStream(ctx, key, r, size, contentType)` (v0.14.0) uploads without holding the file in
   memory (backup archives, large exports): one PUT signed with `UNSIGNED-PAYLOAD`.
 
+#### Planned for video ads (not built, 2026-10-22)
+
+MarketFlow's video ads need large uploads that never pass through the API, and chunked reads for
+platform uploads. These are planned for a new tag. The signatures below are the design, not code:
+
+| Planned | Purpose |
+|---|---|
+| `UploadURL(ctx, key, contentType, maxBytes, ttl)` | presigned PUT, so a browser uploads footage straight to the bucket (never through ingress or the 100 MB Cloudflare request limit). The key is minted by `NewKey` first; the service checks `Exists` and the size after the client reports completion |
+| `CreateMultipart` / `PartURL(uploadID, part, ttl)` / `CompleteMultipart` / `AbortMultipart` | presigned multipart upload for files above about 100 MB, with resume after an interrupted part; abandoned uploads are aborted by the service's purge job |
+| `OpenRange(ctx, ref, offset, length)` | ranged read, so a worker can stream a stored video to YouTube or TikTok in 8 MB chunks without buffering it |
+| `PutStream` option `WithCacheControl(value)` | short-cache public objects (`public, max-age=300`) for preview videos that are deleted after review, instead of the default year-long caching |
+| media type `video_draft` | generated preview videos: MP4, up to 300 MB, not re-encoded, public or private bucket per call (public previews by default) |
+| media type `video_source` | customer-uploaded footage: MP4 or MOV, private bucket, up to 1 GB through multipart |
+
+Rules that stay: store the key, never a link; presigned links are never sent through Image
+Transformations; deletes go through `Owned` first.
+
 ### Tenant exports (`tenantexport`, v0.14.0)
 
 `tenantexport.Write(ctx, db, tenantID, w, opts)` streams one tenant's rows of the service's
