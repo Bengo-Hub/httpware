@@ -133,6 +133,16 @@ type TenantConfig struct {
 	// AllowMismatch turns off the mismatch check below. Leave it false; it exists only so a service
 	// with a known legacy client can be migrated in steps.
 	AllowMismatch bool
+
+	// ReportOnly lets a mismatched request through (the claims still win in the context values)
+	// instead of answering 403, so a service can turn the check on, watch OnMismatch for
+	// legitimate clients that would be refused, and then enforce.
+	ReportOnly bool
+
+	// OnMismatch, when set, is called for every mismatch (enforced or report-only) with where the
+	// value came from (X-Tenant-ID, X-Tenant-Slug or url:<param>), the supplied and the claimed
+	// value. Use it to log; it must not write the response.
+	OnMismatch func(r *http.Request, source, supplied, claimed string)
 }
 
 // TenantV2 middleware resolves tenant ID and slug via chained extraction:
@@ -177,8 +187,21 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			// 2. HTTP headers (fill gaps)
 			hdrID := r.Header.Get(HeaderTenantID)
 			hdrSlug := r.Header.Get(HeaderTenantSlug)
-			if mismatch(hdrID, claimTenantID) || mismatch(hdrSlug, claimTenantSlug) {
+			// refused reports a mismatch and says whether the request was answered 403.
+			refused := func(source, supplied, claimed string) bool {
+				if cfg.OnMismatch != nil {
+					cfg.OnMismatch(r, source, supplied, claimed)
+				}
+				if cfg.ReportOnly {
+					return false
+				}
 				writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+				return true
+			}
+			if mismatch(hdrID, claimTenantID) && refused(HeaderTenantID, hdrID, claimTenantID) {
+				return
+			}
+			if mismatch(hdrSlug, claimTenantSlug) && refused(HeaderTenantSlug, hdrSlug, claimTenantSlug) {
 				return
 			}
 			if tenantID == "" && hdrID != "" {
@@ -195,8 +218,7 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" {
 					if _, err := uuid.Parse(param); err == nil {
 						// It's a UUID → use as tenant ID (override for platform owners)
-						if mismatch(param, claimTenantID) {
-							writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+						if mismatch(param, claimTenantID) && refused("url:"+cfg.URLParamName, param, claimTenantID) {
 							return
 						}
 						if tenantID == "" || isPlatformOwner {
@@ -204,8 +226,7 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 						}
 					} else {
 						// It's a slug → use as tenant slug (override for platform owners)
-						if mismatch(param, claimTenantSlug) {
-							writeJSONError(w, http.StatusForbidden, "tenant does not match the signed-in organization")
+						if mismatch(param, claimTenantSlug) && refused("url:"+cfg.URLParamName, param, claimTenantSlug) {
 							return
 						}
 						if tenantSlug == "" || isPlatformOwner {

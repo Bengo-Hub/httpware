@@ -23,7 +23,7 @@ Always take the latest tag (`git tag --sort=-v:refname | head -1`); a service pi
 misses security fixes.
 
 ```bash
-go get github.com/Bengo-Hub/httpware@v0.17.0
+go get github.com/Bengo-Hub/httpware@v0.18.0
 ```
 
 ## Usage
@@ -333,6 +333,11 @@ When the caller has claims and is not a platform owner, a header or URL value th
 tenant than the claims is refused with 403 (JSON). Platform owners may scope a request to any tenant
 through the URL, and requests without claims (service calls, public routes) keep the header and URL
 values. `TenantConfig.AllowMismatch` turns the check off for a service migrating in steps.
+
+To roll the check out on a service whose handlers read the header themselves (v0.18.0): set
+`ReportOnly: true` and an `OnMismatch(r, source, supplied, claimed)` that logs. Mismatched requests
+go through and are logged; once the logs show no legitimate client sending another tenant, drop
+`ReportOnly` to enforce. `OnMismatch` is also called for enforced refusals.
 
 ### Logging
 

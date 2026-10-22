@@ -118,6 +118,42 @@ func TestTenantV2RejectsMismatchedTenant(t *testing.T) {
 	}
 }
 
+func TestTenantV2ReportOnly(t *testing.T) {
+	const idA = "11111111-1111-1111-1111-111111111111"
+	const idB = "22222222-2222-2222-2222-222222222222"
+	var reported []string
+	cfg := TenantConfig{
+		ClaimsExtractor: claimsFor(idA, "acme", false),
+		OnMismatch: func(_ *http.Request, source, supplied, claimed string) {
+			reported = append(reported, source+"="+supplied+"/"+claimed)
+		},
+	}
+
+	// Enforced: refused, and still reported.
+	if rec := do(TenantV2(cfg)(ok()), "GET", "/", map[string]string{HeaderTenantID: idB}); rec.Code != http.StatusForbidden {
+		t.Fatalf("enforced mismatch: %d", rec.Code)
+	}
+	if len(reported) != 1 || reported[0] != HeaderTenantID+"="+idB+"/"+idA {
+		t.Fatalf("enforced mismatch must be reported: %v", reported)
+	}
+
+	// Report only: the request goes through with the claimed tenant, and both bad headers are
+	// reported.
+	reported = nil
+	cfg.ReportOnly = true
+	rec := do(TenantV2(cfg)(ok()), "GET", "/", map[string]string{HeaderTenantID: idB, HeaderTenantSlug: "rival"})
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Body.String(), idA+"|") {
+		t.Fatalf("report-only must pass with the claimed tenant: %d %q", rec.Code, rec.Body.String())
+	}
+	if len(reported) != 2 {
+		t.Fatalf("report-only must report each mismatch: %v", reported)
+	}
+	reported = nil
+	if rec := do(TenantV2(cfg)(ok()), "GET", "/", map[string]string{HeaderTenantID: idA}); rec.Code != 200 || len(reported) != 0 {
+		t.Errorf("a matching header is not reported: %d %v", rec.Code, reported)
+	}
+}
+
 func TestTenantV2PlatformOwnerAndNoClaims(t *testing.T) {
 	// A platform owner may scope a request to any tenant through the URL.
 	owner := TenantV2(TenantConfig{
