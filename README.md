@@ -23,7 +23,7 @@ Always take the latest tag (`git tag --sort=-v:refname | head -1`); a service pi
 misses security fixes.
 
 ```bash
-go get github.com/Bengo-Hub/httpware@v0.16.0
+go get github.com/Bengo-Hub/httpware@v0.17.0
 ```
 
 ## Usage
@@ -236,22 +236,25 @@ item.ImageURL = store.URL(item.ImageKey) // public URL, or a signed link for pri
 - `PutStream(ctx, key, r, size, contentType)` (v0.14.0) uploads without holding the file in
   memory (backup archives, large exports): one PUT signed with `UNSIGNED-PAYLOAD`.
 
-#### Planned for video ads (not built, 2026-10-22)
+#### Direct uploads, ranged reads and video (v0.17.0)
 
-MarketFlow's video ads need large uploads that never pass through the API, and chunked reads for
-platform uploads. These are planned for a new tag. The signatures below are the design, not code:
+Large files (MarketFlow's video ads) go straight from the browser to the bucket, never through the
+API, the ingress or Cloudflare's 100 MB request limit. These need object storage; in local mode
+they return `ErrRemoteOnly` and the service takes the file itself (`ReadUpload`, `PutStream`).
 
-| Planned | Purpose |
+| Call | Purpose |
 |---|---|
-| `UploadURL(ctx, key, contentType, maxBytes, ttl)` | presigned PUT, so a browser uploads footage straight to the bucket (never through ingress or the 100 MB Cloudflare request limit). The key is minted by `NewKey` first; the service checks `Exists` and the size after the client reports completion |
-| `CreateMultipart` / `PartURL(uploadID, part, ttl)` / `CompleteMultipart` / `AbortMultipart` | presigned multipart upload for files above about 100 MB, with resume after an interrupted part; abandoned uploads are aborted by the service's purge job |
-| `OpenRange(ctx, ref, offset, length)` | ranged read, so a worker can stream a stored video to YouTube or TikTok in 8 MB chunks without buffering it |
-| `PutStream` option `WithCacheControl(value)` | short-cache public objects (`public, max-age=300`) for preview videos that are deleted after review, instead of the default year-long caching |
-| media type `video_draft` | generated preview videos: MP4, up to 300 MB, not re-encoded, public or private bucket per call (public previews by default) |
-| media type `video_source` | customer-uploaded footage: MP4 or MOV, private bucket, up to 1 GB through multipart |
+| `UploadURL(ctx, key, contentType, ttl)` | presigned PUT (`DirectUpload{URL, Method, Headers, ExpiresAt}`). The client must send exactly `Headers` (Content-Type and Cache-Control are signed). Mint the key with `NewKey` first |
+| `CreateMultipart(ctx, key, contentType)` / `PartURL(key, uploadID, part, ttl)` / `CompleteMultipart(ctx, key, uploadID, parts)` / `AbortMultipart(ctx, key, uploadID)` | presigned multipart upload for files above about 100 MB (parts of 5 MB or more, up to `MaxParts`), resumable per part. The client reports each part's `ETag`, so the bucket's CORS rules must expose `ETag`. Abort uploads given up on: their parts stay in the bucket until then |
+| `VerifyUpload(ctx, key)` | after the client reports completion: checks the file exists, fits the media type's `MaxBytes`, and has an allowed type by its first bytes (the declared type is not trusted). A file that breaks a rule is deleted and an upload error returned (400) |
+| `OpenRange(ctx, ref, offset, length)` | ranged read, so a worker streams a stored video to YouTube or TikTok in chunks without buffering it; `ErrInvalidRange` past the end |
+| `Stat(ctx, ref)` | size and stored content type (`ObjectInfo`) |
+| `TypeVideoDrafts` (`video-drafts`) | generated preview videos: public bucket, MP4, up to 300 MB, cached for 5 minutes (`MediaType.CacheControl`) since drafts are deleted after review |
+| `TypeVideoSources` (`video-sources`) | customer footage: private bucket, MP4 or MOV, up to 1 GB |
 
-Rules that stay: store the key, never a link; presigned links are never sent through Image
-Transformations; deletes go through `Owned` first.
+A media type may set `CacheControl` to replace the year-long caching of public objects; it applies
+to `Put`, `PutStream` and direct uploads alike. Rules that stay: store the key, never a link;
+presigned links are never sent through Image Transformations; deletes go through `Owned` first.
 
 ### Tenant exports (`tenantexport`, v0.14.0)
 
@@ -403,3 +406,5 @@ pos-api, treasury-api, inventory-api, ordering-backend, logistics-api, erp-api, 
 notifications-api, subscriptions-api, auth-api, hospital-api, library-api, maskani-api, projects-api
 and ticketing-api. Keep them on the latest tag; the older ones (below v0.15.0) lack the tenant export
 probe, and below v0.16.0 lack `RequireServiceKey`, the fixed CORS and the `TenantV2` mismatch check.
+v0.17.0 adds direct uploads and the video media types; the only change to existing calls is that
+MP4 and MOV uploads now get a `.mp4` or `.mov` extension and MOV sniffs as `video/quicktime`.

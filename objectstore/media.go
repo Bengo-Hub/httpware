@@ -18,6 +18,9 @@ type MediaType struct {
 	// Image re-encodes JPEG and PNG uploads, which strips EXIF (location, device) and anything
 	// hidden in the file.
 	Image bool
+	// CacheControl replaces the default Cache-Control of a public object (a year, immutable), for
+	// files deleted soon after they are stored (preview videos).
+	CacheControl string
 }
 
 const (
@@ -37,9 +40,18 @@ const (
 	TypeExports       = "exports"
 	TypeBackups       = "backups"
 	TypeEbooks        = "ebooks"
+	// TypeVideoDrafts are generated preview videos, public by default so a reviewer can open the
+	// link anywhere, and cached briefly since a draft is deleted after review.
+	TypeVideoDrafts = "video-drafts"
+	// TypeVideoSources is customer footage, uploaded straight to the bucket (UploadURL or a
+	// multipart upload) and checked with VerifyUpload.
+	TypeVideoSources = "video-sources"
 )
 
-var imageTypes = []string{"image/jpeg", "image/png"}
+var (
+	imageTypes = []string{"image/jpeg", "image/png"}
+	videoTypes = []string{"video/mp4", "video/quicktime"}
+)
 
 var (
 	registryMu sync.RWMutex
@@ -62,6 +74,8 @@ func init() {
 		{Name: TypeExports, MaxBytes: 200 * mb},
 		{Name: TypeBackups, MaxBytes: 2048 * mb},
 		{Name: TypeEbooks, MaxBytes: 100 * mb, Allowed: []string{"application/pdf", "application/epub+zip", "application/zip"}},
+		{Name: TypeVideoDrafts, Public: true, MaxBytes: 300 * mb, Allowed: []string{"video/mp4"}, CacheControl: "public, max-age=300"},
+		{Name: TypeVideoSources, MaxBytes: 1024 * mb, Allowed: videoTypes},
 	} {
 		registry[t.Name] = t
 	}
@@ -89,4 +103,17 @@ func mustLookup(name string) (MediaType, error) {
 		return MediaType{}, fmt.Errorf("objectstore: unknown media type %q", name)
 	}
 	return t, nil
+}
+
+// cacheControl is the Cache-Control an object of this type is stored with. Keys are unique per
+// upload (a uuid or a content hash), so a public file never changes under its URL and may be
+// cached for a year unless its type says otherwise.
+func cacheControl(info keyInfo) string {
+	if !info.public {
+		return "private, no-store"
+	}
+	if t, ok := Lookup(info.mediaType); ok && t.CacheControl != "" {
+		return t.CacheControl
+	}
+	return "public, max-age=31536000, immutable"
 }

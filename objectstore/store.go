@@ -178,13 +178,7 @@ func (s *Store) Put(ctx context.Context, key string, data []byte, contentType st
 		return err
 	}
 	if s.s3 != nil {
-		// Keys are unique per upload (a uuid or a content hash), so a public file never changes
-		// under its URL and may be cached for a year.
-		cc := "private, no-store"
-		if info.public {
-			cc = "public, max-age=31536000, immutable"
-		}
-		return s.s3.put(ctx, s.bucket(info), key, data, contentType, cc)
+		return s.s3.put(ctx, s.bucket(info), key, data, contentType, cacheControl(info))
 	}
 	p, err := s.localPath(key)
 	if err != nil {
@@ -211,11 +205,7 @@ func (s *Store) PutStream(ctx context.Context, key string, r io.Reader, size int
 		return err
 	}
 	if s.s3 != nil {
-		cc := "private, no-store"
-		if info.public {
-			cc = "public, max-age=31536000, immutable"
-		}
-		return s.s3.putStream(ctx, s.bucket(info), key, r, size, contentType, cc)
+		return s.s3.putStream(ctx, s.bucket(info), key, r, size, contentType, cacheControl(info))
 	}
 	p, err := s.localPath(key)
 	if err != nil {

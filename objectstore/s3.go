@@ -191,23 +191,32 @@ func (c *s3Client) fetch(ctx context.Context, bucket, key, rng string) (*http.Re
 }
 
 func (c *s3Client) exists(ctx context.Context, bucket, key string) (bool, error) {
+	_, err := c.head(ctx, bucket, key)
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	return err == nil, err
+}
+
+// head returns an object's size and content type, or ErrNotFound.
+func (c *s3Client) head(ctx context.Context, bucket, key string) (ObjectInfo, error) {
 	req, err := c.newRequest(ctx, http.MethodHead, bucket, key, nil, nil)
 	if err != nil {
-		return false, err
+		return ObjectInfo{}, err
 	}
 	c.sign(req, nil)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return false, fmt.Errorf("objectstore head %s: %w", key, err)
+		return ObjectInfo{}, fmt.Errorf("objectstore head %s: %w", key, err)
 	}
 	defer drain(resp)
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
-		return false, nil
+		return ObjectInfo{}, ErrNotFound
 	case resp.StatusCode >= 300:
-		return false, fmt.Errorf("objectstore head %s: %s", key, resp.Status)
+		return ObjectInfo{}, fmt.Errorf("objectstore head %s: %s", key, resp.Status)
 	}
-	return true, nil
+	return ObjectInfo{Size: resp.ContentLength, ContentType: resp.Header.Get("Content-Type")}, nil
 }
 
 // del removes key; a missing key is not an error (S3 semantics), so deletes are idempotent.
@@ -231,6 +240,16 @@ func (c *s3Client) del(ctx context.Context, bucket, key string) error {
 // presignGet returns a time-limited download link the browser fetches directly. downloadName, when
 // set, makes the response an attachment with that file name.
 func (c *s3Client) presignGet(bucket, key, downloadName string, ttl time.Duration) string {
+	var q map[string]string
+	if downloadName != "" {
+		q = map[string]string{"response-content-disposition": fmt.Sprintf("attachment; filename=%q", downloadName)}
+	}
+	return c.presign(http.MethodGet, bucket, key, q, nil, ttl)
+}
+
+// presign returns a query-signed link for method on key. query is added to the signed query
+// (partNumber, uploadId); headers are signed too, so the client must send exactly those values.
+func (c *s3Client) presign(method, bucket, key string, query, headers map[string]string, ttl time.Duration) string {
 	if ttl <= 0 {
 		ttl = 15 * time.Minute
 	}
@@ -244,19 +263,34 @@ func (c *s3Client) presignGet(bucket, key, downloadName string, ttl time.Duratio
 	canonicalURI := canonicalPath(bucket, key)
 	host := c.endpoint.Host
 
+	values := map[string]string{"host": host}
+	for name, v := range headers {
+		values[strings.ToLower(name)] = strings.TrimSpace(v)
+	}
+	signed := make([]string, 0, len(values))
+	for name := range values {
+		signed = append(signed, name)
+	}
+	sort.Strings(signed)
+	var canonicalHeaders strings.Builder
+	for _, h := range signed {
+		canonicalHeaders.WriteString(h + ":" + values[h] + "\n")
+	}
+	signedHeaders := strings.Join(signed, ";")
+
 	q := map[string]string{
 		"X-Amz-Algorithm":     "AWS4-HMAC-SHA256",
 		"X-Amz-Credential":    c.accessKey + "/" + scope,
 		"X-Amz-Date":          amzDate,
 		"X-Amz-Expires":       strconv.Itoa(int(ttl.Seconds())),
-		"X-Amz-SignedHeaders": "host",
+		"X-Amz-SignedHeaders": signedHeaders,
 	}
-	if downloadName != "" {
-		q["response-content-disposition"] = fmt.Sprintf("attachment; filename=%q", downloadName)
+	for k, v := range query {
+		q[k] = v
 	}
 	canonicalQuery := encodeQuery(q)
 	canonicalRequest := strings.Join([]string{
-		http.MethodGet, canonicalURI, canonicalQuery, "host:" + host + "\n", "host", "UNSIGNED-PAYLOAD",
+		method, canonicalURI, canonicalQuery, canonicalHeaders.String(), signedHeaders, unsignedPayload,
 	}, "\n")
 	stringToSign := strings.Join([]string{"AWS4-HMAC-SHA256", amzDate, scope, hashHex([]byte(canonicalRequest))}, "\n")
 	signature := hex.EncodeToString(hmacSHA256(c.signingKey(dateStamp), []byte(stringToSign)))

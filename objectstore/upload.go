@@ -121,6 +121,10 @@ func sniff(raw []byte) string {
 	if ct == "application/zip" && bytes.Contains(raw[:min(len(raw), 128)], []byte("application/epub+zip")) {
 		return "application/epub+zip"
 	}
+	// net/http knows MP4 but not QuickTime: a MOV file opens with an "ftyp" box of brand "qt  ".
+	if ct == "application/octet-stream" && len(raw) >= 12 && string(raw[4:12]) == "ftypqt  " {
+		return "video/quicktime"
+	}
 	return ct
 }
 
@@ -150,6 +154,10 @@ func extFor(ct string) string {
 		return ".gz"
 	case "text/plain":
 		return ".txt"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
 	}
 	return ""
 }

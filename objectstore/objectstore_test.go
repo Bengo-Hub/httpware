@@ -3,6 +3,9 @@ package objectstore
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/xml"
+	"fmt"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -12,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -26,18 +30,79 @@ type fakeS3 struct {
 	objects map[string][]byte // bucket/key
 	headers map[string]http.Header
 	puts    int
+	// uploads holds the parts of unfinished multipart uploads by upload id.
+	uploads map[string]map[int][]byte
+	nextID  int
 }
 
 func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
-	f := &fakeS3{objects: map[string][]byte{}, headers: map[string]http.Header{}}
+	f := &fakeS3{objects: map[string][]byte{}, headers: map[string]http.Header{}, uploads: map[string]map[int][]byte{}}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential=AK/") {
+		if r.URL.Query().Get("X-Amz-Signature") != "" {
+			if err := verifyPresigned(r, "SK"); err != nil {
+				http.Error(w, err.Error(), http.StatusForbidden)
+				return
+			}
+		} else if !strings.HasPrefix(r.Header.Get("Authorization"), "AWS4-HMAC-SHA256 Credential=AK/") {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		p := strings.TrimPrefix(r.URL.Path, "/")
+		q := r.URL.Query()
+		switch {
+		case r.Method == http.MethodPost && q.Has("uploads"):
+			f.nextID++
+			id := fmt.Sprintf("up-%d", f.nextID)
+			f.uploads[id] = map[int][]byte{}
+			f.headers[p] = r.Header.Clone()
+			fmt.Fprintf(w, "<InitiateMultipartUploadResult><UploadId>%s</UploadId></InitiateMultipartUploadResult>", id)
+			return
+		case r.Method == http.MethodPut && q.Has("uploadId"):
+			parts, ok := f.uploads[q.Get("uploadId")]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			n, _ := strconv.Atoi(q.Get("partNumber"))
+			b, _ := io.ReadAll(r.Body)
+			parts[n] = b
+			w.Header().Set("ETag", fmt.Sprintf("%q", fmt.Sprintf("etag-%d", n)))
+			return
+		case r.Method == http.MethodPost && q.Has("uploadId"):
+			parts, ok := f.uploads[q.Get("uploadId")]
+			if !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			var doc completeMultipartUpload
+			if err := xml.NewDecoder(r.Body).Decode(&doc); err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			var joined []byte
+			for i, part := range doc.Parts {
+				if part.PartNumber != i+1 || part.ETag != fmt.Sprintf("%q", fmt.Sprintf("etag-%d", part.PartNumber)) {
+					// S3 reports a bad part list in a 200 answer.
+					fmt.Fprint(w, "<Error><Code>InvalidPart</Code></Error>")
+					return
+				}
+				joined = append(joined, parts[part.PartNumber]...)
+			}
+			f.objects[p] = joined
+			delete(f.uploads, q.Get("uploadId"))
+			fmt.Fprint(w, "<CompleteMultipartUploadResult></CompleteMultipartUploadResult>")
+			return
+		case r.Method == http.MethodDelete && q.Has("uploadId"):
+			if _, ok := f.uploads[q.Get("uploadId")]; !ok {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			delete(f.uploads, q.Get("uploadId"))
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		switch r.Method {
 		case http.MethodPut:
 			b, _ := io.ReadAll(r.Body)
@@ -60,6 +125,55 @@ func newFakeS3(t *testing.T) (*fakeS3, *httptest.Server) {
 	}))
 	t.Cleanup(srv.Close)
 	return f, srv
+}
+
+// verifyPresigned checks a query-signed request the way S3 does: the canonical request is rebuilt
+// from what arrived (path, query without the signature, the signed headers' values as sent), so a
+// link signed wrongly, or a client sending other header values than were signed, is refused.
+func verifyPresigned(r *http.Request, secret string) error {
+	q := r.URL.Query()
+	cred := strings.SplitN(q.Get("X-Amz-Credential"), "/", 2)
+	if len(cred) != 2 || cred[0] != "AK" {
+		return fmt.Errorf("bad credential %q", q.Get("X-Amz-Credential"))
+	}
+	date, err := time.Parse("20060102T150405Z", q.Get("X-Amz-Date"))
+	if err != nil {
+		return err
+	}
+	secs, _ := strconv.Atoi(q.Get("X-Amz-Expires"))
+	if time.Now().After(date.Add(time.Duration(secs) * time.Second)) {
+		return fmt.Errorf("link expired")
+	}
+	given := q.Get("X-Amz-Signature")
+	params := map[string]string{}
+	for k := range q {
+		if k != "X-Amz-Signature" {
+			params[k] = q.Get(k)
+		}
+	}
+	signed := strings.Split(q.Get("X-Amz-SignedHeaders"), ";")
+	var headers strings.Builder
+	for _, h := range signed {
+		v := r.Header.Get(h)
+		if h == "host" {
+			v = r.Host
+		}
+		headers.WriteString(h + ":" + strings.TrimSpace(v) + "\n")
+	}
+	canonical := strings.Join([]string{
+		r.Method, r.URL.EscapedPath(), encodeQuery(params), headers.String(), q.Get("X-Amz-SignedHeaders"), "UNSIGNED-PAYLOAD",
+	}, "\n")
+	parts := strings.Split(cred[1], "/") // date/region/s3/aws4_request
+	scope := strings.Join(parts, "/")
+	toSign := strings.Join([]string{"AWS4-HMAC-SHA256", q.Get("X-Amz-Date"), scope, hashHex([]byte(canonical))}, "\n")
+	key := hmacSHA256([]byte("AWS4"+secret), []byte(parts[0]))
+	for _, p := range parts[1:] {
+		key = hmacSHA256(key, []byte(p))
+	}
+	if want := hex.EncodeToString(hmacSHA256(key, []byte(toSign))); want != given {
+		return fmt.Errorf("signature mismatch")
+	}
+	return nil
 }
 
 // remoteStore is an "inventory" store on a fake S3, with a media volume at root (may be "").
