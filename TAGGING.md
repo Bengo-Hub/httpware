@@ -62,6 +62,21 @@ Build and commit one service at a time.
 - ...
 ```
 
+## v0.19.0
+
+### Features
+- `tax`: the platform's one VAT calculator. `Compute` works out each line and the document totals, `Split`
+  separates an amount into taxable value and VAT, `BandFor` resolves the KRA eTIMS OSCU band (A exempt,
+  B standard, C zero-rated, D non-VAT, E reduced) and `PercentOf` resolves a percentage discount.
+  - VAT is rounded to 2 decimal places on each line; totals and the per-band eTIMS figures are sums of the
+    rounded lines.
+  - A document discount is shared across the lines (largest remainder) and reduces each line before its
+    VAT, taken off the taxable subtotal (`DiscountOnNet`, invoices) or off the bill (`DiscountOnGross`,
+    tills and carts).
+  - Rates are never built in: callers pass the rate treasury serves.
+  - `tax/testdata/vectors.json` is shared with `@bengo-hub/shared-ui-lib/tax`, so the TypeScript and Go
+    calculators are held to the same figures.
+
 ## v0.16.0
 
 ### Features

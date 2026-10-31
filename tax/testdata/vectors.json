@@ -1,0 +1,148 @@
+[
+  {
+    "name": "single exclusive line, VAT rounded on the line",
+    "discount_base": "net",
+    "discount": 0,
+    "lines": [{ "quantity": 3, "unit_price": 85.6, "discount": 0, "rate": 16, "inclusive": false, "band": "B" }],
+    "expect": {
+      "lines": [{ "net": 256.8, "tax": 41.09, "gross": 297.89, "doc_discount": 0, "band": "B" }],
+      "net": 256.8, "tax": 41.09, "gross": 297.89, "doc_discount": 0,
+      "bands": { "B": { "taxable": 256.8, "tax": 41.09 } }
+    }
+  },
+  {
+    "name": "three exclusive invoice lines, no discount",
+    "discount_base": "net",
+    "discount": 0,
+    "lines": [
+      { "quantity": 1, "unit_price": 85.6, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 288, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 240, "discount": 0, "rate": 16, "inclusive": false, "band": "B" }
+    ],
+    "expect": {
+      "lines": [
+        { "net": 85.6, "tax": 13.7, "gross": 99.3, "doc_discount": 0, "band": "B" },
+        { "net": 288, "tax": 46.08, "gross": 334.08, "doc_discount": 0, "band": "B" },
+        { "net": 240, "tax": 38.4, "gross": 278.4, "doc_discount": 0, "band": "B" }
+      ],
+      "net": 613.6, "tax": 98.18, "gross": 711.78, "doc_discount": 0,
+      "bands": { "B": { "taxable": 613.6, "tax": 98.18 } }
+    }
+  },
+  {
+    "name": "invoice global discount comes off the taxable value before VAT",
+    "discount_base": "net",
+    "discount": 61.36,
+    "lines": [
+      { "quantity": 1, "unit_price": 85.6, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 288, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 240, "discount": 0, "rate": 16, "inclusive": false, "band": "B" }
+    ],
+    "expect": {
+      "lines": [
+        { "net": 77.04, "tax": 12.33, "gross": 89.37, "doc_discount": 8.56, "band": "B" },
+        { "net": 259.2, "tax": 41.47, "gross": 300.67, "doc_discount": 28.8, "band": "B" },
+        { "net": 216, "tax": 34.56, "gross": 250.56, "doc_discount": 24, "band": "B" }
+      ],
+      "net": 552.24, "tax": 88.36, "gross": 640.6, "doc_discount": 61.36,
+      "bands": { "B": { "taxable": 552.24, "tax": 88.36 } }
+    }
+  },
+  {
+    "name": "till discount off the bill across standard and non-VAT inclusive lines",
+    "discount_base": "gross",
+    "discount": 100,
+    "lines": [
+      { "quantity": 2, "unit_price": 250, "discount": 0, "rate": 16, "inclusive": true, "band": "B" },
+      { "quantity": 1, "unit_price": 300, "discount": 0, "rate": 0, "inclusive": true, "band": "D" }
+    ],
+    "expect": {
+      "lines": [
+        { "net": 377.16, "tax": 60.34, "gross": 437.5, "doc_discount": 62.5, "band": "B" },
+        { "net": 262.5, "tax": 0, "gross": 262.5, "doc_discount": 37.5, "band": "D" }
+      ],
+      "net": 639.66, "tax": 60.34, "gross": 700, "doc_discount": 100,
+      "bands": { "B": { "taxable": 377.16, "tax": 60.34 }, "D": { "taxable": 262.5, "tax": 0 } }
+    }
+  },
+  {
+    "name": "till discount off the bill with an exclusive and an inclusive line",
+    "discount_base": "gross",
+    "discount": 16.6,
+    "lines": [
+      { "quantity": 1, "unit_price": 100, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 50, "discount": 0, "rate": 16, "inclusive": true, "band": "B" }
+    ],
+    "expect": {
+      "lines": [
+        { "net": 90, "tax": 14.4, "gross": 104.4, "doc_discount": 11.6, "band": "B" },
+        { "net": 38.79, "tax": 6.21, "gross": 45, "doc_discount": 5, "band": "B" }
+      ],
+      "net": 128.79, "tax": 20.61, "gross": 149.4, "doc_discount": 16.6,
+      "bands": { "B": { "taxable": 128.79, "tax": 20.61 } }
+    }
+  },
+  {
+    "name": "line discount on a reduced rate line",
+    "discount_base": "net",
+    "discount": 0,
+    "lines": [{ "quantity": 10, "unit_price": 199.99, "discount": 99.9, "rate": 8, "inclusive": false, "band": "E" }],
+    "expect": {
+      "lines": [{ "net": 1900, "tax": 152, "gross": 2052, "doc_discount": 0, "band": "E" }],
+      "net": 1900, "tax": 152, "gross": 2052, "doc_discount": 0,
+      "bands": { "E": { "taxable": 1900, "tax": 152 } }
+    }
+  },
+  {
+    "name": "taxable-value discount on an inclusive line",
+    "discount_base": "net",
+    "discount": 10,
+    "lines": [{ "quantity": 1, "unit_price": 116, "discount": 0, "rate": 16, "inclusive": true, "band": "B" }],
+    "expect": {
+      "lines": [{ "net": 90, "tax": 14.4, "gross": 104.4, "doc_discount": 10, "band": "B" }],
+      "net": 90, "tax": 14.4, "gross": 104.4, "doc_discount": 10,
+      "bands": { "B": { "taxable": 90, "tax": 14.4 } }
+    }
+  },
+  {
+    "name": "discount larger than the lines is capped",
+    "discount_base": "net",
+    "discount": 80,
+    "lines": [{ "quantity": 1, "unit_price": 50, "discount": 0, "rate": 16, "inclusive": false, "band": "B" }],
+    "expect": {
+      "lines": [{ "net": 0, "tax": 0, "gross": 0, "doc_discount": 50, "band": "B" }],
+      "net": 0, "tax": 0, "gross": 0, "doc_discount": 50,
+      "bands": { "B": { "taxable": 0, "tax": 0 } }
+    }
+  },
+  {
+    "name": "VAT is rounded per line, not on the document total",
+    "discount_base": "net",
+    "discount": 0,
+    "lines": [
+      { "quantity": 1, "unit_price": 0.1, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 0.1, "discount": 0, "rate": 16, "inclusive": false, "band": "B" },
+      { "quantity": 1, "unit_price": 0.1, "discount": 0, "rate": 16, "inclusive": false, "band": "B" }
+    ],
+    "expect": {
+      "lines": [
+        { "net": 0.1, "tax": 0.02, "gross": 0.12, "doc_discount": 0, "band": "B" },
+        { "net": 0.1, "tax": 0.02, "gross": 0.12, "doc_discount": 0, "band": "B" },
+        { "net": 0.1, "tax": 0.02, "gross": 0.12, "doc_discount": 0, "band": "B" }
+      ],
+      "net": 0.3, "tax": 0.06, "gross": 0.36, "doc_discount": 0,
+      "bands": { "B": { "taxable": 0.3, "tax": 0.06 } }
+    }
+  },
+  {
+    "name": "a taxed letter at a zero rate falls back to exempt",
+    "discount_base": "net",
+    "discount": 0,
+    "lines": [{ "quantity": 1, "unit_price": 100, "discount": 0, "rate": 0, "inclusive": false, "band": "B" }],
+    "expect": {
+      "lines": [{ "net": 100, "tax": 0, "gross": 100, "doc_discount": 0, "band": "A" }],
+      "net": 100, "tax": 0, "gross": 100, "doc_discount": 0,
+      "bands": { "A": { "taxable": 100, "tax": 0 } }
+    }
+  }
+]

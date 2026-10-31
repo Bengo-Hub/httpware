@@ -15,7 +15,7 @@ Standardized HTTP middleware for Codevertex microservices, eliminating code dupl
 - **CORS / StandardCORS** - the one browser cross-origin policy for every service
 - **RequireServiceKey / ValidServiceKey** - constant-time, fail-closed service-to-service key check
 - **StaticMedia, MediaSigner, IsStreaming / BypassForStreaming** - media serving and streaming helpers
-- Sub-packages: `contact`, `money`, `pii`, `objectstore`, `tenantexport`
+- Sub-packages: `contact`, `money`, `tax`, `pii`, `objectstore`, `tenantexport`
 
 ## Installation
 
@@ -312,6 +312,40 @@ money.Split(discount, 2, n, weights...) // prorate a discount without losing a c
 
 Rounding is half away from zero and strips float noise (1.005 gives 1.01, negatives mirror).
 The currency table mirrors `CURRENCY_META` in shared-ui-lib; keep the two in step.
+
+### VAT: `tax` (v0.19.0)
+
+The single place services work out VAT. Treasury owns the codes and rates; this package owns the
+arithmetic, so a till, a storefront cart, an invoice and an eTIMS payload give the same figures. Do not
+write a private VAT split, discount proration or band map in a service.
+
+```go
+import "github.com/Bengo-Hub/httpware/tax"
+
+res := tax.Compute(tax.Document{
+	Lines: []tax.Line{
+		{Quantity: 2, UnitPrice: 250, Rate: 16, Inclusive: true, Band: "B"},
+		{Quantity: 1, UnitPrice: 300, Rate: 0, Inclusive: true, Band: "D"},
+	},
+	Discount:     100,                  // resolve a percentage first with tax.PercentOf
+	DiscountBase: tax.DiscountOnGross,  // off the bill; tax.DiscountOnNet for an invoice subtotal
+})
+res.Lines[0].Net, res.Lines[0].Tax  // 377.16, 60.34 after its 62.50 share of the discount
+res.Bands[tax.BandStandard]         // the eTIMS header figures for band B
+
+tax.Split(116, 16, true)            // 100, 16, 116
+tax.BandFor("D", 0)                 // D; a taxed rate decides B or E, a zero rate trusts A, C or D
+```
+
+Rules the package applies:
+
+- VAT is rounded to 2 decimal places on each line, which is how KRA eTIMS validates an item. Totals
+  and band figures are sums of the rounded lines.
+- A document discount reduces each line before its VAT, because VAT is due on the consideration
+  actually paid. The shares add up to the discount exactly.
+- Bands follow the OSCU code list: A exempt, B standard, C zero-rated, D non-VAT, E reduced.
+
+`tax/testdata/vectors.json` is shared with `@bengo-hub/shared-ui-lib/tax`; change both together.
 
 ## Middleware Details
 
