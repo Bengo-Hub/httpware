@@ -256,3 +256,40 @@ func TestRecover(t *testing.T) {
 	h = Recover(log)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { panic(http.ErrAbortHandler) }))
 	do(h, "GET", "/", nil)
 }
+
+// Security audit 2026-11-10: a signed-in, non-privileged token with no tenant claim skipped the
+// comparison, so the header or URL chose the tenant and a tenantless session could act in any
+// organisation. Enforced, it is refused; report-only reports it and leaves no tenant.
+func TestTenantV2SignedInWithoutTenantClaim(t *testing.T) {
+	var reported []string
+	cfg := TenantConfig{
+		ClaimsExtractor: claimsFor("", "", false),
+		URLParamFunc:    func(*http.Request, string) string { return "" },
+		OnMismatch: func(_ *http.Request, source, supplied, claimed string) {
+			reported = append(reported, source+"="+supplied+"/"+claimed)
+		},
+	}
+	h := TenantV2(cfg)(ok())
+	if rec := do(h, "GET", "/", map[string]string{HeaderTenantID: "22222222-2222-2222-2222-222222222222"}); rec.Code != http.StatusForbidden {
+		t.Fatalf("enforced: header tenant with no tenant claim: %d", rec.Code)
+	}
+	if len(reported) != 1 {
+		t.Fatalf("must be reported: %v", reported)
+	}
+	if rec := do(h, "GET", "/", nil); rec.Code != http.StatusOK {
+		t.Fatalf("no tenant asked for: passes (%d)", rec.Code)
+	}
+
+	cfg.ReportOnly = true
+	reported = nil
+	rec := do(TenantV2(cfg)(ok()), "GET", "/", map[string]string{HeaderTenantSlug: "rival"})
+	if rec.Code != http.StatusOK || rec.Body.String() != "|" || len(reported) != 1 {
+		t.Fatalf("report-only: %d %q %v", rec.Code, rec.Body.String(), reported)
+	}
+
+	// A platform owner (or service key) without a tenant claim still picks the tenant.
+	po := TenantV2(TenantConfig{ClaimsExtractor: claimsFor("", "", true)})(ok())
+	if rec := do(po, "GET", "/", map[string]string{HeaderTenantSlug: "acme"}); rec.Code != 200 || rec.Body.String() != "|acme" {
+		t.Fatalf("platform owner: %d %q", rec.Code, rec.Body.String())
+	}
+}

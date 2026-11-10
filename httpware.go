@@ -180,7 +180,13 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 				}
 			}
 			enforce := haveClaims && !isPlatformOwner && !cfg.AllowMismatch
+			// A signed-in, non-privileged token with no tenant claim never chooses a tenant from a
+			// header or the URL: otherwise a tenantless session could act in any organisation.
+			tenantless := enforce && claimTenantID == "" && claimTenantSlug == ""
 			mismatch := func(supplied, claimed string) bool {
+				if tenantless {
+					return supplied != ""
+				}
 				return enforce && supplied != "" && claimed != "" && !strings.EqualFold(supplied, claimed)
 			}
 
@@ -204,10 +210,10 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			if mismatch(hdrSlug, claimTenantSlug) && refused(HeaderTenantSlug, hdrSlug, claimTenantSlug) {
 				return
 			}
-			if tenantID == "" && hdrID != "" {
+			if tenantID == "" && hdrID != "" && !tenantless {
 				tenantID = hdrID
 			}
-			if tenantSlug == "" && hdrSlug != "" {
+			if tenantSlug == "" && hdrSlug != "" && !tenantless {
 				tenantSlug = hdrSlug
 			}
 
@@ -215,7 +221,11 @@ func TenantV2(cfg TenantConfig) func(http.Handler) http.Handler {
 			// For platform owners, URL param always wins over claims so they can scope
 			// requests to any tenant (e.g. GET /v1/urban-loft/inventory/... as superuser).
 			if cfg.URLParamFunc != nil {
-				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" {
+				if param := cfg.URLParamFunc(r, cfg.URLParamName); param != "" && tenantless {
+					if refused("url:"+cfg.URLParamName, param, "") {
+						return
+					}
+				} else if param != "" {
 					if _, err := uuid.Parse(param); err == nil {
 						// It's a UUID → use as tenant ID (override for platform owners)
 						if mismatch(param, claimTenantID) && refused("url:"+cfg.URLParamName, param, claimTenantID) {
