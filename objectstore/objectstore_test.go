@@ -483,9 +483,11 @@ func TestPrepare(t *testing.T) {
 	_ = jpeg.Encode(&jp, img, nil)
 	_ = png.Encode(&pn, img)
 
+	prev := SetScanner(nil)
+	defer SetScanner(prev)
 	up, err := Prepare(jp.Bytes(), TypeItemImages)
-	if err != nil || up.ContentType != "image/jpeg" || up.Ext != ".jpg" {
-		t.Fatalf("jpeg: %+v %v", up, err)
+	if err != nil || up.ContentType != "image/webp" || up.Ext != ".webp" {
+		t.Fatalf("a jpeg item image is stored as webp: %+v %v", up, err)
 	}
 	// Bytes appended after the image are dropped by the re-encode.
 	withTail := append(append([]byte{}, pn.Bytes()...), []byte("<script>x</script>")...)

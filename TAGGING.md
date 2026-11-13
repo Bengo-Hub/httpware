@@ -62,6 +62,35 @@ Build and commit one service at a time.
 - ...
 ```
 
+## v0.20.0 (13 November 2026)
+
+### Features
+- `objectstore`: upload safety inside `Prepare` and `ReadUpload` (README, "Upload safety"): clamd
+  `INSTREAM` malware scan with a per type policy and the result on `Upload.Scan`; images downscaled
+  (photos 2048 px, logos and signatures 1200 px) and stored as WebP, PNG kept for transparent
+  signatures; PDFs with scripts, launch actions or embedded files refused; allow-lists for
+  `attachments` and `documents`; image types accept WebP.
+- New dependencies: `github.com/gen2brain/webp` v0.6.4 (with `github.com/ebitengine/purego`), and
+  `golang.org/x/image` v0.25.0. Both are pure Go; `CGO_ENABLED=0` builds are unchanged.
+
+### Behaviour changes (services must check these when they bump)
+- Images come back as `image/webp` / `.webp` (or `image/png` for a transparent signature). Use
+  `up.ContentType` and `up.Ext`; tests that expect `.jpg` or `image/jpeg` after `Prepare` change.
+- Inside Kubernetes uploads are scanned by default (`stalwart-clamav.email.svc.cluster.local:3310`).
+  Private types fail closed: with clamd down `Prepare` returns an error wrapping
+  `objectstore.ErrScanUnavailable`; answer 503 (`errors.Is`), not 500.
+- `attachments` and `documents` refuse anything outside PDF, JPEG, PNG, WebP, plain text, `.docx`
+  and `.xlsx`.
+- Record `up.Scan.ScannedAt` and `up.Scan.Engine` with the file where the service keeps metadata.
+
+### Before the first bump
+1. Apply the devops-k8s change to `manifests/email/stalwart-clamav.yaml` (clamd listening on
+   3310, Service port `clamd`, NetworkPolicy for the service namespaces) and check from a service
+   pod that `printf 'zPING\0' | nc stalwart-clamav.email.svc.cluster.local 3310` answers `PONG`.
+2. Tell the peers before the tag ships: every service imports httpware.
+3. Tag, then bump one service at a time, each in its own commit (`go get
+   github.com/Bengo-Hub/httpware@v0.20.0 && go mod tidy && go build ./... && go test ./...`).
+
 ## v0.19.0
 
 ### Features

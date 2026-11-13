@@ -204,8 +204,9 @@ Keys are `<service>/<tenant_id>/<media_type>/<yyyy>/<mm>/<uuid>.<ext>`, or
 `<service>/users/<user_id>/<media_type>/...` for personal media such as avatars. The media type
 (`avatars`, `logos`, `item-images`, `menu-images`, `covers`, `images`, `attachments`, `documents`,
 `kyc`, `patient-photos`, `signatures`, `exports`, `backups`, `ebooks`; `Register` adds more)
-decides the bucket, the size limit, the accepted types and whether images are re-encoded (EXIF and
-trailing bytes removed).
+decides the bucket, the size limit, the accepted types, whether images are re-encoded (EXIF and
+trailing bytes removed; since v0.20.0 downscaled and stored as WebP) and the malware scan policy
+(see "Upload safety" below).
 
 ```go
 store, _ := objectstore.New("inventory", objectstore.FromEnv())
@@ -255,6 +256,60 @@ they return `ErrRemoteOnly` and the service takes the file itself (`ReadUpload`,
 A media type may set `CacheControl` to replace the year-long caching of public objects; it applies
 to `Put`, `PutStream` and direct uploads alike. Rules that stay: store the key, never a link;
 presigned links are never sent through Image Transformations; deletes go through `Owned` first.
+
+#### Upload safety: malware scan, image compression, PDF and type checks (v0.20.0)
+
+Owner decisions of 12 November 2026. Everything below happens inside `Prepare` (and so
+`ReadUpload`), so every service that stores files through them is covered with no code of its own.
+Steps, in order: size limit, sniffed type against the allow-list, PDF check, malware scan of the
+bytes as uploaded, then the image re-encode.
+
+Malware scan. One clamd for the platform: the ClamAV that already scans mail
+(`manifests/email/stalwart-clamav.yaml` in devops-k8s, signatures refreshed by freshclam six
+times a day), reached over TCP with clamd's `INSTREAM` command (plain protocol, no dependency).
+
+| Env | Meaning |
+|---|---|
+| `CLAMD_ADDR` | `host:port` of clamd. Unset inside Kubernetes means `stalwart-clamav.email.svc.cluster.local:3310` (`DefaultClamdAddr`); unset outside Kubernetes (development, unit tests) or `off` turns scanning off |
+| `CLAMD_DIAL_TIMEOUT` | connection timeout, Go duration, default `3s` |
+| `CLAMD_TIMEOUT` | whole scan timeout, default `60s` |
+| `CLAMD_MAX_BYTES` | largest file sent to clamd, default 100 MB (clamd's `StreamMaxLength`) |
+
+| Media type | Scan when clamd answers | clamd unreachable |
+|---|---|---|
+| `attachments`, `documents`, `kyc`, `signatures`, `patient-photos`, `ebooks`, and any private type a service registers | scanned; infected refused (400) | refused: error wrapping `ErrScanUnavailable` (answer 503), ops alert logged |
+| `avatars`, `logos`, `item-images`, `menu-images`, `covers`, `images`, and any public type a service registers | scanned; infected refused (400) | stored, `Scan.Status` is `unavailable`, ops alert logged at error level (`alert=clamd_unavailable`) |
+| `exports`, `backups`, `video-drafts`, `video-sources` | not scanned (platform generated, or uploaded straight to the bucket) | not scanned |
+
+`MediaType.Scan` sets the policy (`ScanAuto`, the zero value: public fails open, private fails
+closed; `ScanFailClosed`, `ScanFailOpen`, `ScanSkip`). The result is on `Upload.Scan`
+(`Status` clean, unavailable or skipped; `ScannedAt`; `Engine`, clamd's version line with the
+signature database version and date). Record `scanned_at` and the engine with the file's
+metadata. Alerts go to `slog.Default()` (stderr) unless `SetScanLogger` is called; `SetScanner`
+swaps the scanner (tests, or another engine).
+
+Images. JPEG, PNG and WebP uploads of an `Image` type are decoded, downscaled to the type's
+`MaxSide` (photos 2048 px on the longest edge, `logos` and `signatures` 1200 px) and stored as
+lossy WebP (quality 82), which also drops EXIF and anything appended. A `signatures` image that
+uses transparency stays PNG (`MediaType.KeepTransparentPNG`, always on for that name, so a
+service that registers its own `signatures` keeps it); logos keep transparency inside WebP.
+`Upload.ContentType` and `Upload.Ext` say what was stored (`image/webp`, `.webp`), so callers
+must use them rather than assume the uploaded type. WebP encoding uses `github.com/gen2brain/webp`
+(libwebp transpiled to Go, no cgo, so `CGO_ENABLED=0` builds keep working); resizing uses
+`golang.org/x/image/draw` (Catmull-Rom).
+
+PDFs are stored as uploaded but refused (400) when they carry `/JavaScript`, `/JS`, `/Launch`,
+`/EmbeddedFile` or `/EmbeddedFiles` (an `/OpenAction` or `/AA` that runs a script carries `/JS`;
+one that only opens a page is fine). The check reads the object syntax, decodes `#xx` escaped
+names and inflates object streams (`/Type /ObjStm`) within fixed bounds (4096 streams, 8 MB per
+stream, 64 MB in all); image, font and page content streams are skipped. It applies to every PDF
+that goes through `Prepare`, ebooks included.
+
+Allow-lists. `attachments` (10 MB) and `documents` (20 MB) now accept only PDF, JPEG, PNG, WebP,
+plain text (CSV sniffs as `text/plain`, stored as `.txt`), Word (`.docx`) and Excel (`.xlsx`).
+HTML, SVG, executables and other zips are refused. Office files are told apart from other zips by
+their part names, which a direct upload's first bytes do not show, so `VerifyUpload` refuses Office
+files for these two types: send them through the API. Image media types also accept WebP now.
 
 ### Tenant exports (`tenantexport`, v0.14.0)
 
@@ -447,3 +502,5 @@ and ticketing-api. Keep them on the latest tag; the older ones (below v0.15.0) l
 probe, and below v0.16.0 lack `RequireServiceKey`, the fixed CORS and the `TenantV2` mismatch check.
 v0.17.0 adds direct uploads and the video media types; the only change to existing calls is that
 MP4 and MOV uploads now get a `.mp4` or `.mov` extension and MOV sniffs as `video/quicktime`.
+v0.20.0 scans uploads with clamd and stores images as WebP; see the bump steps in `TAGGING.md`
+before moving a service to it.

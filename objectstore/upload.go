@@ -5,11 +5,14 @@ import (
 	"errors"
 	"fmt"
 	"image"
-	"image/jpeg"
+	_ "image/jpeg" // registers the JPEG decoder
 	"image/png"
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/gen2brain/webp" // WebP encoder and decoder (libwebp transpiled to Go, no cgo)
+	xdraw "golang.org/x/image/draw"
 )
 
 // Upload is a validated file ready to store.
@@ -18,6 +21,9 @@ type Upload struct {
 	ContentType string
 	Ext         string // with the dot, from the content type
 	FileName    string // as the client sent it, for display only
+	// Scan is the malware scan result. Record Scan.ScannedAt and Scan.Engine with the file
+	// (scanned_at, scan_engine) when Scan.Status is ScanStatusClean.
+	Scan ScanResult
 }
 
 // UploadError is a problem with the client's file; its message is safe to show (400).
@@ -61,8 +67,17 @@ func ReadUpload(w http.ResponseWriter, r *http.Request, field, mediaType string)
 	return up, nil
 }
 
-// Prepare validates bytes from any source (an upload, an import, a URL fetch) against a media type
-// and re-encodes images, the same rules ReadUpload applies.
+// Prepare validates bytes from any source (an upload, an import, a URL fetch) against a media type,
+// the same rules ReadUpload applies:
+//   - size limit and allow-list, by the type sniffed from the bytes;
+//   - a PDF carrying JavaScript, a launch action or an embedded file is refused;
+//   - the bytes as uploaded go to the malware scanner (clamd) under the type's ScanPolicy; the
+//     result is on Upload.Scan for the caller to record (scanned_at, engine);
+//   - images are downscaled to the type's MaxSide and stored as WebP (PNG for a signature that
+//     uses transparency), which also drops EXIF and anything appended to the file.
+//
+// An infected or refused file is an upload error (400). A fail closed type with the scanner down
+// returns an error wrapping ErrScanUnavailable (answer 503).
 func Prepare(raw []byte, mediaType string) (*Upload, error) {
 	t, err := mustLookup(mediaType)
 	if err != nil {
@@ -78,39 +93,87 @@ func Prepare(raw []byte, mediaType string) (*Upload, error) {
 	if len(t.Allowed) > 0 && !contains(t.Allowed, ct) {
 		return nil, uploadErr("this file type is not accepted (%s)", ct)
 	}
-	if t.Image && (ct == "image/jpeg" || ct == "image/png") {
-		clean, err := reencode(raw, ct)
+	if ct == "application/pdf" {
+		if name := pdfActiveContent(raw); name != "" {
+			return nil, uploadErr("this PDF is not accepted: it carries scripts, launch actions or embedded files (/%s)", name)
+		}
+	}
+	scan, err := scanUpload(t, raw)
+	if err != nil {
+		return nil, err
+	}
+	if t.Image && (ct == "image/jpeg" || ct == "image/png" || ct == "image/webp") {
+		clean, outCT, err := reencode(raw, t)
 		if err != nil {
 			return nil, uploadErr("the image could not be read")
 		}
-		raw = clean
+		raw, ct = clean, outCT
 	}
-	return &Upload{Data: raw, ContentType: ct, Ext: extFor(ct)}, nil
+	return &Upload{Data: raw, ContentType: ct, Ext: extFor(ct), Scan: scan}, nil
 }
 
-// reencode decodes and writes the image again, dropping metadata (EXIF location, device) and any
-// payload appended to the file.
-func reencode(raw []byte, ct string) ([]byte, error) {
+// webpQuality is the lossy WebP quality images are stored at.
+const webpQuality = 82
+
+// reencode decodes the image, downscales it to the type's MaxSide and writes it again as WebP (or
+// PNG for a transparent image of a KeepTransparentPNG type), dropping metadata (EXIF location,
+// device) and any payload appended to the file. It returns the bytes and their content type.
+func reencode(raw []byte, t MediaType) ([]byte, string, error) {
 	// Check the dimensions before decoding, so a small file claiming a huge canvas cannot
 	// exhaust memory.
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(raw))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	if cfg.Width > 10000 || cfg.Height > 10000 || cfg.Width*cfg.Height > 40_000_000 {
-		return nil, errors.New("image too large")
+	if cfg.Width <= 0 || cfg.Height <= 0 || cfg.Width > 10000 || cfg.Height > 10000 || cfg.Width*cfg.Height > 40_000_000 {
+		return nil, "", errors.New("image too large")
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
+	img = downscale(img, maxSide(t))
 	var buf bytes.Buffer
-	if ct == "image/png" {
+	if (t.KeepTransparentPNG || t.Name == TypeSignatures) && !opaque(img) {
 		err = png.Encode(&buf, img)
-	} else {
-		err = jpeg.Encode(&buf, img, &jpeg.Options{Quality: 90})
+		return buf.Bytes(), "image/png", err
 	}
-	return buf.Bytes(), err
+	err = webp.Encode(&buf, img, webp.Options{Quality: webpQuality, Method: 4})
+	return buf.Bytes(), "image/webp", err
+}
+
+// downscale shrinks img so its longest edge is at most side, keeping the aspect ratio.
+func downscale(img image.Image, side int) image.Image {
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	if side <= 0 || (w <= side && h <= side) {
+		return img
+	}
+	nw, nh := side, side
+	if w >= h {
+		nh = max(1, int(int64(h)*int64(side)/int64(w)))
+	} else {
+		nw = max(1, int(int64(w)*int64(side)/int64(h)))
+	}
+	dst := image.NewNRGBA(image.Rect(0, 0, nw, nh))
+	xdraw.CatmullRom.Scale(dst, dst.Bounds(), img, b, xdraw.Src, nil)
+	return dst
+}
+
+// opaque reports whether every pixel of img is fully opaque.
+func opaque(img image.Image) bool {
+	if o, ok := img.(interface{ Opaque() bool }); ok {
+		return o.Opaque()
+	}
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			if _, _, _, a := img.At(x, y).RGBA(); a != 0xffff {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func sniff(raw []byte) string {
@@ -120,6 +183,16 @@ func sniff(raw []byte) string {
 	}
 	if ct == "application/zip" && bytes.Contains(raw[:min(len(raw), 128)], []byte("application/epub+zip")) {
 		return "application/epub+zip"
+	}
+	// Word and Excel files are zips; their part names (in the central directory at the end)
+	// say which. A partial read (VerifyUpload's first bytes) stays application/zip.
+	if ct == "application/zip" && bytes.Contains(raw, []byte("[Content_Types].xml")) {
+		switch {
+		case bytes.Contains(raw, []byte("word/document.xml")):
+			return officeTypes[0]
+		case bytes.Contains(raw, []byte("xl/workbook.xml")):
+			return officeTypes[1]
+		}
 	}
 	// net/http knows MP4 but not QuickTime: a MOV file opens with an "ftyp" box of brand "qt  ".
 	if ct == "application/octet-stream" && len(raw) >= 12 && string(raw[4:12]) == "ftypqt  " {
@@ -158,6 +231,10 @@ func extFor(ct string) string {
 		return ".mp4"
 	case "video/quicktime":
 		return ".mov"
+	case officeTypes[0]:
+		return ".docx"
+	case officeTypes[1]:
+		return ".xlsx"
 	}
 	return ""
 }
