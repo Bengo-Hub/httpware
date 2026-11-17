@@ -402,6 +402,33 @@ Rules the package applies:
 
 `tax/testdata/vectors.json` is shared with `@bengo-hub/shared-ui-lib/tax`; change both together.
 
+### Outbound fetch guard: `netguard` (v0.23.0)
+
+For any request to a URL that came from data (a tenant's website, an uploaded media link, a
+provider result). Only public unicast addresses are reached. The check runs in the dialer on the
+address actually connected to, after DNS, so DNS rebinding cannot reach the cluster or the cloud
+metadata address. Every redirect is checked again.
+
+```go
+import "github.com/Bengo-Hub/httpware/netguard"
+
+// https only, port 443, at most 5 redirects (the zero Options).
+client := netguard.Client(netguard.Options{Timeout: 10 * time.Second})
+
+// Public pages and media that may lack https: also http on port 80.
+media := netguard.Client(netguard.Options{Timeout: 3 * time.Minute, AllowHTTP: true})
+
+// Refuse a bad URL before any request (scheme, credentials, port, non-public IP literal).
+if _, err := (netguard.Options{AllowHTTP: true}).CheckURL(ctx, raw); err != nil { ... }
+
+netguard.IsPublic(addr)   // netip.Addr
+netguard.IsPublicIP(ip)   // net.IP
+```
+
+- The client ignores proxy environment variables, so the dial check always sees the real target.
+- `AllowPrivate` turns the address and port checks off; use it only in tests that serve from 127.0.0.1.
+- Used by marketflow-api (`internal/platform/publicweb`) and marketflow-ai (`internal/guardrail`).
+
 ## Middleware Details
 
 ### RequestID
