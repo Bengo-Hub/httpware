@@ -5,6 +5,7 @@ package contact
 import (
 	"errors"
 	"net/mail"
+	"strconv"
 	"strings"
 
 	"github.com/nyaruka/phonenumbers"
@@ -38,8 +39,23 @@ func NormalizePhone(raw, region string) (string, error) {
 		raw = "+" + digits(raw)
 	}
 	num, err := phonenumbers.Parse(raw, strings.ToUpper(region))
-	if err != nil || !phonenumbers.IsValidNumber(num) {
+	if err != nil {
 		return "", ErrInvalidPhone
+	}
+	if !phonenumbers.IsValidNumber(num) {
+		// A field with a fixed "+254" prefix gets the country code typed again ("+254 254 7...").
+		// Drop the repeated code only when what remains is a valid number of that same country.
+		code := int(num.GetCountryCode())
+		cc := strconv.Itoa(code)
+		national := strconv.FormatUint(num.GetNationalNumber(), 10)
+		if !strings.HasPrefix(national, cc) {
+			return "", ErrInvalidPhone
+		}
+		fixed, perr := phonenumbers.Parse("+"+national, "")
+		if perr != nil || !phonenumbers.IsValidNumber(fixed) || int(fixed.GetCountryCode()) != code {
+			return "", ErrInvalidPhone
+		}
+		num = fixed
 	}
 	return phonenumbers.Format(num, phonenumbers.E164), nil
 }

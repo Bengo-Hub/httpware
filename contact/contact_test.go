@@ -25,6 +25,30 @@ func TestNormalizePhone(t *testing.T) {
 	}
 }
 
+// The ways people mistype a number into a field with a fixed "+254" prefix are repaired: the
+// country code typed again, or the national 0 kept. A doubled code that is also cut short (the
+// 2026-10-30 "+2542547171061") is not a valid number and is rejected, never stored.
+func TestNormalizePhoneRepairsMistypedCountryCode(t *testing.T) {
+	ok := map[string]string{
+		"+254254717106156":     "+254717106156",
+		"+254 254 717 106 156": "+254717106156",
+		"254254110123456":      "+254110123456",
+		"+2540717106156":       "+254717106156",
+		"+256256772123456":     "+256772123456",
+	}
+	for in, want := range ok {
+		got, err := NormalizePhone(in, "")
+		if err != nil || got != want {
+			t.Errorf("NormalizePhone(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, bad := range []string{"+2542547171061", "+254254", "+2549123456789"} {
+		if got, err := NormalizePhone(bad, ""); err == nil {
+			t.Errorf("NormalizePhone(%q) = %q, should fail", bad, got)
+		}
+	}
+}
+
 // Numbers from any country are valid when written with their country code; the region only
 // changes how a local "0..." form is read.
 func TestNormalizePhoneAnyCountry(t *testing.T) {
